@@ -38,6 +38,19 @@ namespace NetworkMonitor
             
             try
             {
+                // 首先检查是否已经认证
+                Log("检查当前认证状态...");
+                if (await IsAuthenticatedAsync())
+                {
+                    Log("✓ 已经认证成功，无需重复登录");
+                    result.Success = true;
+                    result.Message = "已经认证成功，无需重复登录";
+                    result.StatusCode = System.Net.HttpStatusCode.OK;
+                    return result;
+                }
+                
+                Log("未认证，开始登录流程...");
+                
                 using var handler = new HttpClientHandler { AllowAutoRedirect = false };
                 using var httpClient = new HttpClient(handler);
                 _httpClient = httpClient;
@@ -95,16 +108,38 @@ namespace NetworkMonitor
             {
                 using var httpClient = new HttpClient();
                 httpClient.Timeout = TimeSpan.FromSeconds(10);
+                httpClient.DefaultRequestHeaders.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
                 
+                Log($"访问 {_portalUrl} 检查认证状态...");
                 var response = await httpClient.GetAsync(_portalUrl);
                 var content = await response.Content.ReadAsStringAsync();
                 
-                return content.Contains("认证成功") || 
-                       content.Contains("您已经成功登录") ||
-                       content.Contains("disconnconfig");
+                Log($"响应状态码: {(int)response.StatusCode}");
+                Log($"响应大小: {content.Length} 字节");
+                
+                // 检查各种成功标志
+                bool isAuthenticated = content.Contains("认证成功") || 
+                                     content.Contains("您已经成功登录") ||
+                                     content.Contains("disconnconfig") ||
+                                     content.Contains("连接网络") ||
+                                     content.Contains("您可以关闭该页面");
+                
+                if (isAuthenticated)
+                {
+                    Log("✓ 检测到认证成功标志");
+                }
+                else
+                {
+                    Log("未检测到认证成功标志");
+                    // 保存响应以便调试
+                    await SaveDebugResponseAsync(content, "check_auth");
+                }
+                
+                return isAuthenticated;
             }
-            catch
+            catch (Exception ex)
             {
+                Log($"检查认证状态失败: {ex.Message}");
                 return false;
             }
         }

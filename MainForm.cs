@@ -44,11 +44,93 @@ namespace NetworkMonitor
         private bool enableTimeRange = false;
         private TimeSpan startTime = new TimeSpan(6, 0, 0);   // 06:00
         private TimeSpan endTime = new TimeSpan(23, 0, 0);    // 23:00
+        private string username = "23325024026";  // 校园网用户名
+        private string password = "17881936070";  // 校园网密码
 
         public MainForm()
         {
+            LoadSettings();
             InitializeLogFile();
             InitializeComponents();
+        }
+
+        private void LoadSettings()
+        {
+            try
+            {
+                var settings = SettingsManager.Load();
+                
+                loginUrl = settings.LoginUrl;
+                primaryDns = settings.PrimaryDns;
+                secondaryDns = settings.SecondaryDns;
+                pingTimeout = settings.PingTimeout;
+                showNotification = settings.ShowNotification;
+                showTrayNotification = settings.ShowTrayNotification;
+                showRecoveryNotification = settings.ShowRecoveryNotification;
+                autoStart = settings.AutoStart;
+                saveTestResult = settings.SaveTestResult;
+                testResultPath = settings.TestResultPath;
+                enableTimeRange = settings.EnableTimeRange;
+                
+                // 解析时间
+                if (TimeSpan.TryParse(settings.StartTime, out TimeSpan parsedStartTime))
+                {
+                    startTime = parsedStartTime;
+                }
+                
+                if (TimeSpan.TryParse(settings.EndTime, out TimeSpan parsedEndTime))
+                {
+                    endTime = parsedEndTime;
+                }
+                
+                // 加载用户名和密码
+                username = settings.Username;
+                password = settings.Password;
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"加载设置失败: {ex.Message}\n将使用默认设置", "警告", 
+                    MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
+        private void SaveSettings()
+        {
+            try
+            {
+                var settings = new AppSettings
+                {
+                    LoginUrl = loginUrl,
+                    PrimaryDns = primaryDns,
+                    SecondaryDns = secondaryDns,
+                    PingTimeout = pingTimeout,
+                    ShowNotification = showNotification,
+                    ShowTrayNotification = showTrayNotification,
+                    ShowRecoveryNotification = showRecoveryNotification,
+                    AutoStart = autoStart,
+                    SaveTestResult = saveTestResult,
+                    TestResultPath = testResultPath,
+                    EnableTimeRange = enableTimeRange,
+                    StartTime = startTime.ToString(@"hh\:mm\:ss"),
+                    EndTime = endTime.ToString(@"hh\:mm\:ss"),
+                    CheckInterval = (int)intervalInput.Value,
+                    Username = username,
+                    Password = password
+                };
+                
+                if (SettingsManager.Save(settings))
+                {
+                    AddLog($"设置已保存到: {SettingsManager.GetSettingsFilePath()}");
+                }
+                else
+                {
+                    AddLog("保存设置失败");
+                }
+            }
+            catch (Exception ex)
+            {
+                AddLog($"保存设置异常: {ex.Message}");
+            }
         }
 
         private void InitializeLogFile()
@@ -137,6 +219,17 @@ namespace NetworkMonitor
                 Maximum = 300,
                 Value = 5
             };
+            
+            // 应用已保存的检查间隔
+            try
+            {
+                var settings = SettingsManager.Load();
+                if (settings.CheckInterval > 0)
+                {
+                    intervalInput.Value = Math.Min(Math.Max(settings.CheckInterval, 1), 300);
+                }
+            }
+            catch { /* 忽略错误，使用默认值 */ }
 
             startButton = new Button
             {
@@ -179,6 +272,16 @@ namespace NetworkMonitor
             };
             loginTestButton.Click += LoginTestButton_Click;
 
+            // 系统网络状态按钮
+            Button systemStatusButton = new Button
+            {
+                Text = "系统网络状态",
+                Location = new System.Drawing.Point(380, 195),
+                Size = new System.Drawing.Size(110, 30),
+                Font = new System.Drawing.Font("微软雅黑", 9)
+            };
+            systemStatusButton.Click += SystemStatusButton_Click;
+
             // 日志显示区域
             Label logLabel = new Label
             {
@@ -209,6 +312,7 @@ namespace NetworkMonitor
                 settingsButton,
                 testButton,
                 loginTestButton,
+                systemStatusButton,
                 logLabel,
                 logTextBox
             });
@@ -349,6 +453,9 @@ namespace NetworkMonitor
                 startTime = settingsForm.StartTime;
                 endTime = settingsForm.EndTime;
 
+                // 保存设置到文件
+                SaveSettings();
+                
                 MessageBox.Show("设置已保存", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 AddLog($"设置已更新: {loginUrl}, DNS: {primaryDns}/{secondaryDns}");
             }
@@ -364,8 +471,8 @@ namespace NetworkMonitor
                 // 使用封装的认证类
                 var authenticator = new CampusNetworkAuthenticator(
                     loginUrl, 
-                    "23325024026",  // 用户名
-                    "17881936070"   // 密码
+                    username,
+                    password
                 );
                 
                 // 订阅日志事件
@@ -416,7 +523,11 @@ namespace NetworkMonitor
                     var content = await response.Content.ReadAsStringAsync();
 
                     // 检测认证状态
-                    bool isAuthenticated = content.Contains("认证成功");
+                    bool isAuthenticated = content.Contains("认证成功") || 
+                                         content.Contains("您已经成功登录") ||
+                                         content.Contains("disconnconfig") ||
+                                         content.Contains("连接网络") ||
+                                         content.Contains("您可以关闭该页面");
                     
                     if (isAuthenticated)
                     {
@@ -523,7 +634,7 @@ namespace NetworkMonitor
                 notifyIcon.Icon = System.Drawing.SystemIcons.Warning;
                 notifyIcon.Text = "网络监控工具 - 网络断开";
 
-                // 只在网络从连接变为断开时打开浏览器一次
+                // 只在网络从连接变为断开时自动登录一次
                 if (wasConnected && !hasOpenedBrowser)
                 {
                     AddLog("检测到网络断开");
@@ -531,11 +642,12 @@ namespace NetworkMonitor
                     // 检查是否在允许的时间段内
                     if (IsInAllowedTimeRange())
                     {
-                        OpenLoginPage();
+                        // 自动登录校园网
+                        _ = AutoLoginAsync(); // 异步执行，不阻塞
                         hasOpenedBrowser = true;
                         if (showTrayNotification)
                         {
-                            notifyIcon.ShowBalloonTip(3000, "网络断开", "检测到网络断开，已打开登录页面", ToolTipIcon.Warning);
+                            notifyIcon.ShowBalloonTip(3000, "网络断开", "检测到网络断开，正在尝试自动登录...", ToolTipIcon.Warning);
                         }
                     }
                     else
@@ -572,6 +684,132 @@ namespace NetworkMonitor
             else
             {
                 return currentTime >= startTime && currentTime <= endTime;
+            }
+        }
+
+        private void SystemStatusButton_Click(object? sender, EventArgs e)
+        {
+            AddLog("\n===== 系统网络状态检测 =====");
+            
+            try
+            {
+                // 获取所有网络接口
+                NetworkInterface[] adapters = NetworkInterface.GetAllNetworkInterfaces();
+                
+                bool hasActiveConnection = false;
+                
+                foreach (NetworkInterface adapter in adapters)
+                {
+                    // 跳过非活动和环回接口
+                    if (adapter.OperationalStatus != OperationalStatus.Up || 
+                        adapter.NetworkInterfaceType == NetworkInterfaceType.Loopback)
+                        continue;
+                    
+                    hasActiveConnection = true;
+                    
+                    AddLog($"\n网络适配器: {adapter.Name}");
+                    AddLog($"  描述: {adapter.Description}");
+                    AddLog($"  类型: {adapter.NetworkInterfaceType}");
+                    AddLog($"  状态: {adapter.OperationalStatus}");
+                    AddLog($"  速度: {adapter.Speed / 1000000} Mbps");
+                    
+                    // 获取IP配置
+                    IPInterfaceProperties ipProperties = adapter.GetIPProperties();
+                    
+                    // 显示IPv4地址
+                    var ipv4Addresses = ipProperties.UnicastAddresses
+                        .Where(addr => addr.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                        .ToList();
+                    
+                    if (ipv4Addresses.Any())
+                    {
+                        foreach (var addr in ipv4Addresses)
+                        {
+                            AddLog($"  IPv4地址: {addr.Address}");
+                            AddLog($"  子网掩码: {addr.IPv4Mask}");
+                        }
+                    }
+                    
+                    // 显示IPv6地址
+                    var ipv6Addresses = ipProperties.UnicastAddresses
+                        .Where(addr => addr.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetworkV6)
+                        .ToList();
+                    
+                    if (ipv6Addresses.Any())
+                    {
+                        foreach (var addr in ipv6Addresses)
+                        {
+                            AddLog($"  IPv6地址: {addr.Address}");
+                        }
+                    }
+                    
+                    // 显示网关信息
+                    var gateways = ipProperties.GatewayAddresses;
+                    if (gateways.Any())
+                    {
+                        foreach (var gateway in gateways)
+                        {
+                            AddLog($"  网关: {gateway.Address}");
+                        }
+                    }
+                    
+                    // 显示DNS服务器
+                    var dnsServers = ipProperties.DnsAddresses;
+                    if (dnsServers.Any())
+                    {
+                        foreach (var dns in dnsServers)
+                        {
+                            AddLog($"  DNS服务器: {dns}");
+                        }
+                    }
+                    
+                    // 显示DHCP服务器
+                    if (ipProperties.DhcpServerAddresses.Any())
+                    {
+                        foreach (var dhcp in ipProperties.DhcpServerAddresses)
+                        {
+                            AddLog($"  DHCP服务器: {dhcp}");
+                        }
+                    }
+                    
+                    // 获取统计信息
+                    IPv4InterfaceStatistics stats = adapter.GetIPv4Statistics();
+                    AddLog($"  接收字节数: {stats.BytesReceived:N0}");
+                    AddLog($"  发送字节数: {stats.BytesSent:N0}");
+                    AddLog($"  接收包数: {stats.UnicastPacketsReceived:N0}");
+                    AddLog($"  发送包数: {stats.UnicastPacketsSent:N0}");
+                    AddLog($"  丢弃包数: {stats.IncomingPacketsDiscarded + stats.OutgoingPacketsDiscarded:N0}");
+                    AddLog($"  错误包数: {stats.IncomingPacketsWithErrors + stats.OutgoingPacketsWithErrors:N0}");
+                }
+                
+                if (!hasActiveConnection)
+                {
+                    AddLog("\n没有检测到活动的网络连接！");
+                }
+                
+                // 测试网络连通性
+                AddLog("\n===== 网络连通性测试 =====");
+                
+                // 检查是否可以解析DNS
+                try
+                {
+                    AddLog("正在测试DNS解析...");
+                    IPAddress[] addresses = Dns.GetHostAddresses("www.baidu.com");
+                    AddLog($"DNS解析成功: www.baidu.com => {string.Join(", ", addresses.Select(a => a.ToString()))}");
+                }
+                catch (Exception ex)
+                {
+                    AddLog($"DNS解析失败: {ex.Message}");
+                }
+                
+                // 检查Internet连接状态（使用Windows API）
+                AddLog($"\nInternet连接状态: {(NetworkInterface.GetIsNetworkAvailable() ? "已连接" : "未连接")}");
+                
+                AddLog("\n===== 检测完成 =====");
+            }
+            catch (Exception ex)
+            {
+                AddLog($"获取系统网络状态失败: {ex.Message}");
             }
         }
 
@@ -615,17 +853,60 @@ namespace NetworkMonitor
             }
         }
 
-        private void OpenLoginPage()
+        private async Task AutoLoginAsync()
         {
             try
             {
-                AddLog($"打开登录页面: {loginUrl}");
-                var loginForm = new AutoLoginBrowser(loginUrl);
-                loginForm.Show();
+                AddLog("开始自动登录校园网...");
+                
+                // 使用封装的认证类
+                var authenticator = new CampusNetworkAuthenticator(
+                    loginUrl, 
+                    username,
+                    password
+                );
+                
+                // 订阅日志事件
+                authenticator.LogMessage += AddLog;
+                
+                // 执行认证
+                var result = await authenticator.AuthenticateAsync();
+                
+                // 显示结果
+                if (result.Success)
+                {
+                    AddLog("✓ 自动登录成功！");
+                    
+                    if (showNotification)
+                    {
+                        notifyIcon.ShowBalloonTip(3000, "登录成功", "校园网自动登录成功！", ToolTipIcon.Info);
+                    }
+                    
+                    // 登录成功后重置标志，允许下次断开时再次尝试
+                    hasOpenedBrowser = false;
+                }
+                else
+                {
+                    AddLog($"✗ 自动登录失败: {result.Message}");
+                    
+                    if (showNotification)
+                    {
+                        notifyIcon.ShowBalloonTip(5000, "登录失败", 
+                            $"校园网自动登录失败\n{result.Message}", 
+                            ToolTipIcon.Warning);
+                    }
+                }
             }
             catch (Exception ex)
             {
-                AddLog($"打开登录页面失败: {ex.Message}");
+                AddLog($"自动登录异常: {ex.Message}");
+                
+                if (showNotification)
+                {
+                    notifyIcon.ShowBalloonTip(5000, "登录错误", 
+                        $"自动登录发生错误\n{ex.Message}", 
+                        ToolTipIcon.Error);
+                }
             }
         }
 
