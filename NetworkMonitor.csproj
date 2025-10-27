@@ -11,4 +11,53 @@
     <PackageReference Include="Microsoft.Web.WebView2" Version="1.0.2792.45" />
   </ItemGroup>
 
+  <ItemGroup>
+    <Content Include=".git\COMMIT_EDITMSG" />
+    <Content Include=".git\config" />
+    <Content Include=".git\description" />
+    <Content Include=".git\HEAD" />
+    <Content Include=".git\hooks\applypatch-msg.sample" />
+    <Content Include=".git\hooks\commit-msg.sample" />
+    <Content Include=".git\hooks\fsmonitor-watchman.sample" />
+    <Content Include=".git\hooks\post-update.sample" />
+    <Content Include=".git\hooks\pre-applypatch.sample" />
+    <Content Include=".git\hooks\pre-commit.sample" />
+    <Content Include=".git\hooks\pre-merge-commit.sample" />
+    <Content Include=".git\hooks\pre-push.sample" />
+    <Content Include=".git\hooks\pre-rebase.sample" />
+    <Content Include=".git\hooks\pre-receive.sample" />
+    <Content Include=".git\hooks\prepare-commit-msg.sample" />
+    <Content Include=".git\hooks\push-to-checkout.sample" />
+    <Content Include=".git\hooks\sendemail-validate.sample" />
+    <Content Include=".git\hooks\update.sample" />
+    <Content Include=".git\index" />
+    <Content Include=".git\info\exclude" />
+    <Content Include=".git\logs\HEAD" />
+    <Content Include=".git\logs\refs\heads\master" />
+    <Content Include=".git\logs\refs\remotes\origin\master" />
+    <Content Include=".git\objects\05\1f185deecb6dd878303b179a18a8c1366685d2" />
+    <Content Include=".git\objects\0c\803c95b128a1e89b215bdb9f5e80e440d3c814" />
+    <Content Include=".git\objects\17\83b3219d049715dab8af6273f7c364bbf339d3" />
+    <Content Include=".git\objects\18\378274745ef910c1989748f5681e1e7f192c08" />
+    <Content Include=".git\objects\47\4a06fdace1e4527db31a3fd406bc024278d21e" />
+    <Content Include=".git\objects\4c\372ff13931b405be6657d36bc06932c7df7673" />
+    <Content Include=".git\objects\5a\e749a42e33d5d1d6b9260d252b256f879b80da" />
+    <Content Include=".git\objects\70\1589f6bf02d6ae522dab63cad59557a90d3766" />
+    <Content Include=".git\objects\71\d46614ad91916da82ebb984f2226124ee20dfb" />
+    <Content Include=".git\objects\72\4652688b9ab5177efa2b46a22b6ee2096c5bcd" />
+    <Content Include=".git\objects\86\6673abad25d12b1331072103fe8a3fbad4fd00" />
+    <Content Include=".git\objects\95\e12a393acc199d773658107bb50b12f52db067" />
+    <Content Include=".git\objects\a2\7a2b82392430dbf85bd6f5af5f2679da555205" />
+    <Content Include=".git\objects\bd\ca25e7da02f8dc370b8e30c0d3021e2cd86ca2" />
+    <Content Include=".git\objects\ff\be6cc5bf0e638bfd949bf4a7c49e182f08c253" />
+    <Content Include=".git\refs\heads\master" />
+    <Content Include=".git\refs\remotes\origin\master" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Folder Include=".git\objects\info\" />
+    <Folder Include=".git\objects\pack\" />
+    <Folder Include=".git\refs\tags\" />
+  </ItemGroup>
+
 </Project>
