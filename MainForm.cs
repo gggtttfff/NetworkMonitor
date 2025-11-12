@@ -1381,10 +1381,24 @@ namespace NetworkMonitor
                             PingReply reply = await ping.SendPingAsync(primaryDns, pingTimeout);
                             if (reply.Status == IPStatus.Success)
                             {
-                                AddLog($"Ping {primaryDns} 成功，延迟: {reply.RoundtripTime}ms");
-                                return true;
+                                // 检测异常的0ms延迟 - 这通常意味着DNS缓存响应，实际没有真正联网
+                                if (reply.RoundtripTime == 0)
+                                {
+                                    AddLog($"⚠️ Ping {primaryDns} 返回0ms延迟(异常) - IP: {reply.Address}");
+                                    AddLog($"   这通常表示DNS缓存响应，网络可能未真正连接");
+                                    AddLog($"   将视为网络断开，尝试重新认证");
+                                    // 不返回true，继续检查其他方式
+                                }
+                                else
+                                {
+                                    AddLog($"Ping {primaryDns} 成功，延迟: {reply.RoundtripTime}ms (IP: {reply.Address})");
+                                    return true;
+                                }
                             }
-                            AddLog($"Ping {primaryDns} 失败: {reply.Status}");
+                            else
+                            {
+                                AddLog($"Ping {primaryDns} 失败: {reply.Status}");
+                            }
                         }
                         
                         // 尝试ping备用DNS
@@ -1394,27 +1408,59 @@ namespace NetworkMonitor
                             PingReply reply = await ping.SendPingAsync(secondaryDns, pingTimeout);
                             if (reply.Status == IPStatus.Success)
                             {
-                                AddLog($"Ping {secondaryDns} 成功，延迟: {reply.RoundtripTime}ms");
-                                return true;
+                                // 检测异常的0ms延迟
+                                if (reply.RoundtripTime == 0)
+                                {
+                                    AddLog($"⚠️ Ping {secondaryDns} 返回0ms延迟(异常) - IP: {reply.Address}");
+                                    AddLog($"   这通常表示DNS缓存响应，网络可能未真正连接");
+                                    AddLog($"   将视为网络断开，尝试重新认证");
+                                    // 不返回true，继续检查其他方式
+                                }
+                                else
+                                {
+                                    AddLog($"Ping {secondaryDns} 成功，延迟: {reply.RoundtripTime}ms (IP: {reply.Address})");
+                                    return true;
+                                }
                             }
-                            AddLog($"Ping {secondaryDns} 失败: {reply.Status}");
+                            else
+                            {
+                                AddLog($"Ping {secondaryDns} 失败: {reply.Status}");
+                            }
                         }
                         
-                        // 尝试ping公共DNS服务器
+                        // 尝试ping公共DNS服务器 (IP地址)
                         AddLog("尝试Ping公共DNS...");
                         PingReply publicReply = await ping.SendPingAsync("223.5.5.5", 3000); // 阿里DNS
                         if (publicReply.Status == IPStatus.Success)
                         {
-                            AddLog($"Ping 223.5.5.5 成功，延迟: {publicReply.RoundtripTime}ms");
-                            return true;
+                            if (publicReply.RoundtripTime == 0)
+                            {
+                                AddLog($"⚠️ Ping 223.5.5.5 返回0ms延迟(异常)");
+                                AddLog($"   IP地址也返回0ms，网络状态异常，将视为断开");
+                                // 不返回true
+                            }
+                            else
+                            {
+                                AddLog($"Ping 223.5.5.5 成功，延迟: {publicReply.RoundtripTime}ms");
+                                return true;
+                            }
                         }
                         
                         // 尝试ping百度DNS
                         publicReply = await ping.SendPingAsync("180.76.76.76", 3000);
                         if (publicReply.Status == IPStatus.Success)
                         {
-                            AddLog($"Ping 180.76.76.76 成功，延迟: {publicReply.RoundtripTime}ms");
-                            return true;
+                            if (publicReply.RoundtripTime == 0)
+                            {
+                                AddLog($"⚠️ Ping 180.76.76.76 返回0ms延迟(异常)");
+                                AddLog($"   IP地址也返回0ms，网络状态异常，将视为断开");
+                                // 不返回true
+                            }
+                            else
+                            {
+                                AddLog($"Ping 180.76.76.76 成功，延迟: {publicReply.RoundtripTime}ms");
+                                return true;
+                            }
                         }
                     }
                     catch (PingException ex)

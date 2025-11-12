@@ -16,6 +16,7 @@ namespace NetworkMonitor
         private readonly string _username;
         private readonly string _password;
         private readonly string _authServer;
+        private readonly string _fallbackAuthServer = "http://172.16.253.121";
         private HttpClient? _httpClient;
         private static readonly HttpClient _sharedHttpClient = new HttpClient() 
         { 
@@ -71,6 +72,14 @@ namespace NetworkMonitor
                 
                 if (!initialResponse.Success)
                 {
+                    // 如果获取参数失败,尝试使用备用登录方法
+                    Log("\n标准登录流程失败,尝试备用登录方法...");
+                    result = await TryFallbackAuthenticationAsync(httpClient);
+                    if (result.Success)
+                    {
+                        return result;
+                    }
+                    
                     result.Success = false;
                     result.Message = initialResponse.Message;
                     return result;
@@ -82,6 +91,17 @@ namespace NetworkMonitor
                 // 第二步: 发送认证请求
                 Log("\n第2步: 发送认证请求到服务器");
                 result = await PerformAuthenticationAsync(httpClient, loginData);
+
+                // 如果标准认证失败,尝试备用方法
+                if (!result.Success)
+                {
+                    Log("\n标准认证失败,尝试备用登录方法...");
+                    var fallbackResult = await TryFallbackAuthenticationAsync(httpClient);
+                    if (fallbackResult.Success)
+                    {
+                        return fallbackResult;
+                    }
+                }
 
                 // 保存调试信息
                 if (!string.IsNullOrEmpty(result.ResponseContent))
@@ -470,6 +490,85 @@ namespace NetworkMonitor
             {
                 // 忽略保存失败
             }
+        }
+
+        /// <summary>
+        /// 备用登录方法: 当2.2.2.2无法访问时,直接使用172.16.253.121登录
+        /// </summary>
+        private async Task<AuthenticationResult> TryFallbackAuthenticationAsync(HttpClient httpClient)
+        {
+            var result = new AuthenticationResult();
+            
+            try
+            {
+                Log($"使用备用认证服务器: {_fallbackAuthServer}");
+                
+                // 构建备用登录URL,使用您提供的URL模式
+                // 注意: 这些参数通常是动态获取的,但在备用模式下我们尝试使用常见默认值
+                var fallbackUrl = $"{_fallbackAuthServer}/portal/usertemp_computer/shaoguanxy-pc/logout.html" +
+                    $"?wlanacip=172.16.253.113" +
+                    $"&wlanuserip=" +  // 留空,让服务器自动检测
+                    $"&wlanacname=NFV-BASE-SGYD" +
+                    $"&mac=" +  // 留空,让服务器自动检测
+                    $"&version=0" +
+                    $"&msg=%E8%AE%A4%E8%AF%81%E6%88%90%E5%8A%9F" +
+                    $"&selfTicket=" +
+                    $"&macChange=false" +
+                    $"&dropLogCheck=-1" +
+                    $"&vlan=199" +
+                    $"&groupId=1" +
+                    $"&userId={_username}";
+                
+                Log($"备用请求URL: {fallbackUrl}");
+                
+                // 发送请求
+                var response = await httpClient.GetAsync(fallbackUrl);
+                var content = await response.Content.ReadAsStringAsync();
+                
+                Log($"备用认证响应状态码: {(int)response.StatusCode}");
+                Log($"响应大小: {content.Length} 字节");
+                
+                result.StatusCode = response.StatusCode;
+                result.ResponseContent = content;
+                
+                // 保存调试信息
+                await SaveDebugResponseAsync(content, "fallback");
+                
+                // 检查是否成功
+                if (response.StatusCode == HttpStatusCode.OK)
+                {
+                    // 检查成功标志
+                    if (content.Contains("认证成功") || 
+                        content.Contains("您已经成功登录") ||
+                        content.Contains("连接网络") ||
+                        content.Contains("您可以关闭该页面"))
+                    {
+                        result.Success = true;
+                        result.Message = "备用登录成功！";
+                        Log("✓ 备用登录成功");
+                    }
+                    else
+                    {
+                        result.Success = false;
+                        result.Message = "备用登录响应异常";
+                        Log("备用登录失败: 未检测到成功标志");
+                    }
+                }
+                else
+                {
+                    result.Success = false;
+                    result.Message = $"备用登录失败: HTTP {(int)response.StatusCode}";
+                }
+            }
+            catch (Exception ex)
+            {
+                Log($"备用登录异常: {ex.Message}");
+                result.Success = false;
+                result.Message = $"备用登录失败: {ex.Message}";
+                result.Exception = ex;
+            }
+            
+            return result;
         }
 
         private void Log(string message)
