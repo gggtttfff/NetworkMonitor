@@ -35,9 +35,8 @@ namespace NetworkMonitor
         private CancellationTokenSource? loginCts = null;
         private Task? loginTask = null;
         
-        // 日志文件
-        private string logFilePath = "";
-        private StreamWriter? logFileWriter = null;
+        // 日志文件 - 使用新的DiagnosticLogger
+        private DiagnosticLogger? diagnosticLogger = null;
         
         // 设置项
         private string loginUrl = "http://2.2.2.2";
@@ -81,7 +80,7 @@ namespace NetworkMonitor
         public MainForm()
         {
             LoadSettings();
-            InitializeLogFile();
+            InitializeDiagnosticLogger();
             InitializeComponents();
         }
 
@@ -208,31 +207,39 @@ namespace NetworkMonitor
             }
         }
 
-        private void InitializeLogFile()
+        private void InitializeDiagnosticLogger()
         {
             try
             {
-                // 创建日志目录
-                string logDir = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs");
-                if (!Directory.Exists(logDir))
+                // 创建诊断日志记录器
+                diagnosticLogger = new DiagnosticLogger();
+                
+                // 订阅日志事件以更新UI
+                diagnosticLogger.OnLogMessage += (message) =>
                 {
-                    Directory.CreateDirectory(logDir);
-                }
-
-                // 按日期创建日志文件
-                string logFileName = $"network_monitor_{DateTime.Now:yyyyMMdd}.log";
-                logFilePath = Path.Combine(logDir, logFileName);
-
-                // 打开文件流 (追加模式)
-                logFileWriter = new StreamWriter(logFilePath, append: true);
-                logFileWriter.AutoFlush = true; // 自动刷新
-
-                // 写入启动日志
-                logFileWriter.WriteLine($"\n========== 程序启动 {DateTime.Now:yyyy-MM-dd HH:mm:ss} ==========");
+                    if (logTextBox.InvokeRequired)
+                    {
+                        logTextBox.Invoke(new Action(() =>
+                        {
+                            logTextBox.AppendText($"{message}\r\n");
+                            logTextBox.SelectionStart = logTextBox.Text.Length;
+                            logTextBox.ScrollToCaret();
+                        }));
+                    }
+                    else
+                    {
+                        logTextBox.AppendText($"{message}\r\n");
+                        logTextBox.SelectionStart = logTextBox.Text.Length;
+                        logTextBox.ScrollToCaret();
+                    }
+                };
+                
+                // 记录启动信息
+                _ = diagnosticLogger.LogInfoAsync($"程序启动 - 日志文件: {diagnosticLogger.GetCurrentLogFilePath()}");
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"初始化日志文件失败: {ex.Message}", "警告", 
+                MessageBox.Show($"初始化诊断日志系统失败: {ex.Message}", "警告", 
                     MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
@@ -409,6 +416,16 @@ namespace NetworkMonitor
                 Font = new System.Drawing.Font("微软雅黑", 9)
             };
             systemStatusButton.Click += SystemStatusButton_Click;
+            
+            // 异常进程检测按钮
+            Button abnormalProcessButton = new Button
+            {
+                Text = "检测异常进程",
+                Location = new System.Drawing.Point(500, 195),
+                Size = new System.Drawing.Size(110, 30),
+                Font = new System.Drawing.Font("微软雅黑", 9)
+            };
+            abnormalProcessButton.Click += AbnormalProcessButton_Click;
 
             // 日志显示区域
             Label logLabel = new Label
@@ -443,6 +460,7 @@ namespace NetworkMonitor
                 testButton,
                 loginTestButton,
                 systemStatusButton,
+                abnormalProcessButton,
                 logLabel,
                 logTextBox
             });
@@ -498,7 +516,7 @@ namespace NetworkMonitor
             isMonitoring = false;
             networkCheckTimer.Stop();
             notifyIcon.Visible = false;
-            logFileWriter?.Close();
+            diagnosticLogger?.Dispose();
             Application.Exit();
         }
 
@@ -517,33 +535,8 @@ namespace NetworkMonitor
 
         private void AddLog(string message)
         {
-            if (logTextBox.InvokeRequired)
-            {
-                logTextBox.Invoke(new Action(() => AddLog(message)));
-                return;
-            }
-
-            string timestamp = DateTime.Now.ToString("HH:mm:ss");
-            string fullTimestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss");
-            string logMessage = $"[{timestamp}] {message}";
-            string fileLogMessage = $"[{fullTimestamp}] {message}";
-
-            // 显示到界面
-            logTextBox.AppendText($"{logMessage}\r\n");
-            
-            // 自动滚动到最后
-            logTextBox.SelectionStart = logTextBox.Text.Length;
-            logTextBox.ScrollToCaret();
-
-            // 写入文件
-            try
-            {
-                logFileWriter?.WriteLine(fileLogMessage);
-            }
-            catch
-            {
-                // 静默失败,不影响主功能
-            }
+            // 使用新的诊断日志系统
+            _ = diagnosticLogger?.LogInfoAsync(message);
         }
 
         private async Task AutoStartMonitoring()
@@ -735,6 +728,12 @@ namespace NetworkMonitor
                 
                 // 订阅日志事件
                 authenticator.LogMessage += AddLog;
+                
+                // 订阅网络错误事件以记录详细诊断
+                authenticator.OnNetworkError += (ex) =>
+                {
+                    _ = diagnosticLogger?.LogNetworkErrorAsync("测试登录时网络错误", ex);
+                };
                 
                 // 执行认证
                 var result = await authenticator.AuthenticateAsync();
@@ -935,31 +934,37 @@ namespace NetworkMonitor
                 notifyIcon.Icon = System.Drawing.SystemIcons.Warning;
                 notifyIcon.Text = "网络监控工具 - 网络断开";
 
-                // 只在网络从连接变为断开时自动登录
-                if (wasConnected)
+                // 网络断开处理
+                bool justDisconnected = wasConnected;
+                wasConnected = false;
+                
+                if (justDisconnected)
                 {
-                    // 记录断开时间
+                    // 记录断开时间（仅在刚断开时记录）
                     lastDisconnectTime = DateTime.Now;
                     UpdateTimeLabels();
                     
                     AddLog("检测到网络断开");
                     
-                    // 检查是否在允许的时间段内
-                    if (IsInAllowedTimeRange())
+                    if (showTrayNotification)
                     {
-                        // 自动登录校园网
-                        _ = AutoLoginAsync(); // 异步执行，不阻塞
-                        if (showTrayNotification)
-                        {
-                            ShowBalloonTipWithSound(3000, "网络断开", "检测到网络断开，正在尝试自动登录...", ToolTipIcon.Warning);
-                        }
+                        ShowBalloonTipWithSound(3000, "网络断开", "检测到网络断开，正在尝试自动登录...", ToolTipIcon.Warning);
                     }
-                    else
+                }
+                
+                // 检查是否在允许的时间段内，并尝试自动登录
+                if (IsInAllowedTimeRange())
+                {
+                    // 自动登录校园网（每次检测到断开都尝试）
+                    _ = AutoLoginAsync(); // 异步执行，不阻塞
+                }
+                else
+                {
+                    if (justDisconnected)
                     {
                         AddLog("当前不在允许的连接时间段内，跳过自动连接");
                     }
                 }
-                wasConnected = false;
             }
         }
 
@@ -1006,7 +1011,232 @@ namespace NetworkMonitor
             }
         }
 
-        private void SystemStatusButton_Click(object? sender, EventArgs e)
+        private async void AbnormalProcessButton_Click(object? sender, EventArgs e)
+        {
+            AddLog("\n===== 开始检测异常进程 =====");
+            
+            try
+            {
+                var warnings = NetworkDiagnostics.DetectAbnormalProcesses();
+                
+                if (!warnings.Any())
+                {
+                    AddLog("✓ 未检测到异常进程");
+                    MessageBox.Show("系统中所有进程的资源使用都在正常范围内。", 
+                        "检测结果", 
+                        MessageBoxButtons.OK, 
+                        MessageBoxIcon.Information);
+                    return;
+                }
+                
+                AddLog($"\n检测到 {warnings.Count} 个异常进程:");
+                foreach (var warning in warnings)
+                {
+                    string levelIcon = warning.WarningLevel switch
+                    {
+                        "Critical" => "🔴",
+                        "High" => "🟠",
+                        "Medium" => "🟡",
+                        _ => "ℹ️"
+                    };
+                    
+                    AddLog($"  {levelIcon} [{warning.WarningLevel}] {warning.ProcessName} (PID: {warning.ProcessId})");
+                    AddLog($"      句柄数: {warning.HandleCount:N0}, 内存: {warning.WorkingSet / 1024 / 1024:N0} MB");
+                    AddLog($"      {warning.Description}");
+                }
+                
+                // 显示最严重的警告
+                var mostCritical = warnings.First();
+                string message = $"检测到 {warnings.Count} 个异常进程！\n\n" +
+                               $"最严重的问题：\n" +
+                               $"进程: {mostCritical.ProcessName} (PID: {mostCritical.ProcessId})\n" +
+                               $"级别: {mostCritical.WarningLevel}\n" +
+                               $"句柄数: {mostCritical.HandleCount:N0}\n" +
+                               $"内存: {mostCritical.WorkingSet / 1024 / 1024:N0} MB\n\n" +
+                               $"{mostCritical.Description}\n\n" +
+                               $"建议：\n" +
+                               string.Join("\n", mostCritical.Suggestions.Select(s => $"  • {s}"));
+                
+                var result = MessageBox.Show(message + "\n\n是否立即关闭此进程？", 
+                    "异常进程警告", 
+                    MessageBoxButtons.YesNo, 
+                    MessageBoxIcon.Warning);
+                
+                if (result == DialogResult.Yes)
+                {
+                    await KillProcessAsync(mostCritical);
+                }
+            }
+            catch (Exception ex)
+            {
+                AddLog($"检测异常进程失败: {ex.Message}");
+                await diagnosticLogger?.LogErrorAsync("检测异常进程失败", ex)!;
+            }
+            
+            AddLog("===== 检测完成 =====");
+        }
+        
+        private async Task KillProcessAsync(NetworkDiagnostics.AbnormalProcessWarning warning)
+        {
+            try
+            {
+                AddLog($"\n正在强制关闭进程: {warning.ProcessName} (PID: {warning.ProcessId})...");
+                
+                var process = Process.GetProcessById(warning.ProcessId);
+                process.Kill(true); // true = 强制结束包括子进程和后台服务
+                process.WaitForExit(5000); // 等待最多5秒
+                
+                AddLog($"✓ 进程 {warning.ProcessName} 已成功关闭（包括所有后台服务）");
+                await diagnosticLogger?.LogInfoAsync($"用户手动关闭异常进程: {warning.ProcessName} (句柄数: {warning.HandleCount:N0})")!;
+                
+                // 等待一下让系统释放资源
+                await Task.Delay(1000);
+                
+                // 再次检测是否还有其他异常进程
+                var remainingWarnings = NetworkDiagnostics.DetectAbnormalProcesses();
+                
+                string successMsg = $"进程 {warning.ProcessName} 已成功关闭。\n\n";
+                
+                if (remainingWarnings.Any())
+                {
+                    successMsg += $"⚠️ 仍有 {remainingWarnings.Count} 个异常进程需要关注。\n\n";
+                }
+                
+                successMsg += "建议：\n" +
+                            "1. 测试网络是否恢复正常\n" +
+                            "2. 再次点击\"检测异常进程\"验证\n" +
+                            "3. 如果问题仍存在，请重启计算机";
+                
+                MessageBox.Show(successMsg, 
+                    "操作成功", 
+                    MessageBoxButtons.OK, 
+                    MessageBoxIcon.Information);
+            }
+            catch (ArgumentException)
+            {
+                // 进程已经不存在
+                AddLog($"ℹ️ 进程 {warning.ProcessName} 已经不存在");
+                MessageBox.Show($"进程 {warning.ProcessName} 已经结束。", 
+                    "信息", 
+                    MessageBoxButtons.OK, 
+                    MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                AddLog($"✗ 关闭进程失败: {ex.Message}");
+                await diagnosticLogger?.LogErrorAsync($"关闭异常进程失败: {warning.ProcessName}", ex)!;
+                
+                string errorMsg = $"无法关闭进程: {ex.Message}\n\n" +
+                                "请尝试：\n" +
+                                "1. 使用任务管理器手动结束（Ctrl+Shift+Esc）\n" +
+                                "2. 以管理员身份运行此程序\n" +
+                                "3. 重启计算机以完全清除";
+                
+                MessageBox.Show(errorMsg, 
+                    "错误", 
+                    MessageBoxButtons.OK, 
+                    MessageBoxIcon.Error);
+            }
+        }
+        
+        private async void SystemStatusButton_Click(object? sender, EventArgs e)
+        {
+            AddLog("\n===== 开始系统网络诊断 =====");
+            
+            try
+            {
+                // 生成完整的诊断报告
+                var diagnosticReport = await NetworkDiagnostics.GenerateFullReportAsync();
+                
+                // 格式化报告
+                string reportText = NetworkDiagnostics.FormatReport(diagnosticReport);
+                
+                // 显示到日志
+                foreach (var line in reportText.Split('\n'))
+                {
+                    if (!string.IsNullOrWhiteSpace(line))
+                    {
+                        AddLog(line.TrimEnd('\r'));
+                    }
+                }
+                
+                // 检查是否有异常进程警告
+                if (diagnosticReport.ProcessWarnings.Any())
+                {
+                    var criticalWarnings = diagnosticReport.ProcessWarnings
+                        .Where(w => w.WarningLevel == "Critical")
+                        .ToList();
+                    
+                    if (criticalWarnings.Any())
+                    {
+                        var warning = criticalWarnings.First();
+                        string message = $"检测到异常进程！\n\n" +
+                                       $"进程: {warning.ProcessName} (PID: {warning.ProcessId})\n" +
+                                       $"句柄数: {warning.HandleCount:N0}\n" +
+                                       $"内存: {warning.WorkingSet / 1024 / 1024:N0} MB\n\n" +
+                                       $"{warning.Description}\n\n" +
+                                       $"建议:\n" +
+                                       string.Join("\n", warning.Suggestions.Select(s => $"  • {s}"));
+                        
+                        var result = MessageBox.Show(message + "\n\n是否立即关闭此进程？", 
+                            "⚠️ 异常进程警告", 
+                            MessageBoxButtons.YesNo, 
+                            MessageBoxIcon.Warning);
+                        
+                        if (result == DialogResult.Yes)
+                        {
+                            try
+                            {
+                                AddLog($"正在强制关闭进程: {warning.ProcessName} (PID: {warning.ProcessId})...");
+                                
+                                var process = Process.GetProcessById(warning.ProcessId);
+                                process.Kill(true); // true = 强制结束包括子进程
+                                process.WaitForExit(5000); // 等待最多5秒
+                                
+                                AddLog($"✓ 进程 {warning.ProcessName} 已成功关闭");
+                                await diagnosticLogger?.LogInfoAsync($"用户手动关闭异常进程: {warning.ProcessName} (句柄数: {warning.HandleCount:N0})")!;
+                                
+                                MessageBox.Show($"进程 {warning.ProcessName} 已成功关闭。\n\n建议：\n1. 测试网络是否恢复正常\n2. 如果问题仍存在，请重启计算机", 
+                                    "操作成功", 
+                                    MessageBoxButtons.OK, 
+                                    MessageBoxIcon.Information);
+                            }
+                            catch (Exception ex)
+                            {
+                                AddLog($"✗ 关闭进程失败: {ex.Message}");
+                                await diagnosticLogger?.LogErrorAsync($"关闭异常进程失败: {warning.ProcessName}", ex)!;
+                                
+                                MessageBox.Show($"无法关闭进程: {ex.Message}\n\n请尝试：\n1. 使用任务管理器手动结束\n2. 以管理员身份运行此程序\n3. 重启计算机", 
+                                    "错误", 
+                                    MessageBoxButtons.OK, 
+                                    MessageBoxIcon.Error);
+                            }
+                        }
+                        
+                        if (showTrayNotification)
+                        {
+                            ShowBalloonTipWithSound(5000, "异常进程警告", 
+                                $"{warning.ProcessName} 占用了 {warning.HandleCount:N0} 个句柄，可能导致网络问题", 
+                                ToolTipIcon.Warning);
+                        }
+                    }
+                }
+                
+                // 保存详细诊断报告到文件
+                await diagnosticLogger?.LogDiagnosticAsync("手动触发的系统网络诊断", diagnosticReport)!;
+                
+                AddLog("===== 诊断完成 =====");
+            }
+            catch (Exception ex)
+            {
+                AddLog($"诊断失败: {ex.Message}");
+                if (diagnosticLogger != null)
+                    await diagnosticLogger.LogErrorAsync("系统网络诊断失败", ex);
+            }
+        }
+
+        /* 以下代码已被新诊断系统替代，保留作为参考
+        private void SystemStatusButton_Click_Old(object? sender, EventArgs e)
         {
             AddLog("\n===== 系统网络状态检测 =====");
             
@@ -1124,13 +1354,14 @@ namespace NetworkMonitor
                 // 检查Internet连接状态（使用Windows API）
                 AddLog($"\nInternet连接状态: {(NetworkInterface.GetIsNetworkAvailable() ? "已连接" : "未连接")}");
                 
-                AddLog("\n===== 检测完成 =====");
+            AddLog("\n===== 检测完成 =====");
             }
             catch (Exception ex)
             {
                 AddLog($"获取系统网络状态失败: {ex.Message}");
             }
         }
+        */
 
         private async Task<bool> CheckNetworkConnectionAsync()
         {
@@ -1236,6 +1467,10 @@ namespace NetworkMonitor
                     AddLog("可能网线未插或网络故障");
                     statusLabel.Text = "状态: 网络故障";
                     statusLabel.ForeColor = System.Drawing.Color.Red;
+                    
+                    // 记录详细的连接错误诊断
+                    _ = diagnosticLogger?.LogNetworkErrorAsync($"无法连接到认证网关 {loginUrl}", ex);
+                    
                     return false;
                 }
                 catch (TaskCanceledException)
@@ -1247,6 +1482,26 @@ namespace NetworkMonitor
             catch (Exception ex)
             {
                 AddLog($"网络检测异常: {ex.Message}");
+                
+                // 记录详细的网络错误诊断
+                _ = diagnosticLogger?.LogNetworkErrorAsync("网络连接检测失败", ex);
+                
+                // 检查是否有异常进程影响网络
+                _ = Task.Run(async () =>
+                {
+                    try
+                    {
+                        var warnings = NetworkDiagnostics.DetectAbnormalProcesses();
+                        if (warnings.Any(w => w.WarningLevel == "Critical"))
+                        {
+                            var critical = warnings.First(w => w.WarningLevel == "Critical");
+                            await diagnosticLogger?.LogAsync(LogLevel.Warning, 
+                                $"检测到异常进程 {critical.ProcessName} (句柄数: {critical.HandleCount:N0})，可能影响网络连接")!;
+                        }
+                    }
+                    catch { }
+                });
+                
                 return false;
             }
         }
@@ -1258,7 +1513,12 @@ namespace NetworkMonitor
             {
                 AddLog("已有登录任务在运行，先取消之前的任务");
                 loginCts.Cancel();
-                try { await loginTask; } catch { }
+                try 
+                { 
+                    if (loginTask != null)
+                        await loginTask; 
+                } 
+                catch { }
                 loginCts.Dispose();
             }
             
@@ -1307,6 +1567,12 @@ namespace NetworkMonitor
                         
                         // 订阅日志事件
                         authenticator.LogMessage += AddLog;
+                        
+                        // 订阅网络错误事件
+                        authenticator.OnNetworkError += (ex) =>
+                        {
+                            _ = diagnosticLogger?.LogNetworkErrorAsync("自动登录时网络错误", ex);
+                        };
                         
                         // 执行认证
                         var result = await authenticator.AuthenticateAsync();
@@ -1421,7 +1687,7 @@ namespace NetworkMonitor
             {
                 networkCheckTimer?.Dispose();
                 notifyIcon?.Dispose();
-                logFileWriter?.Dispose();
+                diagnosticLogger?.Dispose();
             }
             base.Dispose(disposing);
         }

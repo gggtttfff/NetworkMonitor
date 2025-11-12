@@ -23,6 +23,7 @@ namespace NetworkMonitor
         };
 
         public event Action<string>? LogMessage;
+        public event Action<Exception>? OnNetworkError;
 
         public CampusNetworkAuthenticator(string portalUrl, string username, string password, string authServer = "http://172.16.253.121")
         {
@@ -94,6 +95,9 @@ namespace NetworkMonitor
                 result.Message = $"认证失败: {ex.Message}";
                 result.Exception = ex;
                 Log($"认证异常: {ex}");
+                
+                // 触发网络错误事件以便记录详细诊断
+                OnNetworkError?.Invoke(ex);
             }
             finally
             {
@@ -145,6 +149,10 @@ namespace NetworkMonitor
             catch (Exception ex)
             {
                 Log($"检查认证状态失败: {ex.Message}");
+                
+                // 触发网络错误事件
+                OnNetworkError?.Invoke(ex);
+                
                 return false;
             }
         }
@@ -212,8 +220,28 @@ namespace NetworkMonitor
 
                 return (true, "参数提取成功");
             }
+            catch (HttpRequestException httpEx)
+            {
+                // HTTP请求异常，可能是Socket错误
+                Log($"获取参数时HTTP请求失败: {httpEx.Message}");
+                
+                // 检查是否是Socket错误
+                if (httpEx.InnerException is System.Net.Sockets.SocketException socketEx)
+                {
+                    Log($"Socket错误: {socketEx.ErrorCode} ({socketEx.SocketErrorCode})");
+                    if (socketEx.ErrorCode == 10055)
+                    {
+                        Log("检测到Socket缓冲区耗尽错误 (10055)");
+                    }
+                }
+                
+                OnNetworkError?.Invoke(httpEx);
+                return (false, $"获取参数失败: {httpEx.Message}");
+            }
             catch (Exception ex)
             {
+                Log($"获取参数时发生异常: {ex.Message}");
+                OnNetworkError?.Invoke(ex);
                 return (false, $"获取参数失败: {ex.Message}");
             }
         }
@@ -222,47 +250,80 @@ namespace NetworkMonitor
         {
             var result = new AuthenticationResult();
             
-            // 确定认证服务器地址
-            string authServer = !string.IsNullOrEmpty(loginData["wlanacIp"]) ? 
-                $"http://{loginData["wlanacIp"]}" : _authServer;
-            
-            Log($"用户名: {loginData["userid"]}");
-            Log($"认证服务器: {authServer}");
+            try
+            {
+                // 确定认证服务器地址
+                string authServer = !string.IsNullOrEmpty(loginData["wlanacIp"]) ? 
+                    $"http://{loginData["wlanacIp"]}" : _authServer;
+                
+                Log($"用户名: {loginData["userid"]}");
+                Log($"认证服务器: {authServer}");
 
-            // 设置 Referer 头
-            SetRefererHeader(httpClient, authServer, loginData);
-            
-            // 构建请求URL
-            var queryString = BuildQueryString(loginData);
-            var requestUrl = $"{authServer}/quickauth.do?{queryString}";
-            
-            // 发送认证请求
-            var response = await httpClient.GetAsync(requestUrl);
-            var content = await response.Content.ReadAsStringAsync();
-            
-            Log($"响应状态码: {(int)response.StatusCode} {response.StatusCode}");
-            Log($"响应大小: {content.Length} 字节");
-            
-            result.StatusCode = response.StatusCode;
-            result.ResponseContent = content;
-            
-            // 检查响应类型和内容
-            var contentType = response.Content.Headers.ContentType?.MediaType ?? "";
-            Log($"响应类型: {contentType}");
-            
-            // 解析响应
-            if (contentType.Contains("json"))
-            {
-                ParseJsonResponse(content, result);
+                // 设置 Referer 头
+                SetRefererHeader(httpClient, authServer, loginData);
+                
+                // 构建请求URL
+                var queryString = BuildQueryString(loginData);
+                var requestUrl = $"{authServer}/quickauth.do?{queryString}";
+                
+                // 发送认证请求
+                var response = await httpClient.GetAsync(requestUrl);
+                var content = await response.Content.ReadAsStringAsync();
+                
+                Log($"响应状态码: {(int)response.StatusCode} {response.StatusCode}");
+                Log($"响应大小: {content.Length} 字节");
+                
+                result.StatusCode = response.StatusCode;
+                result.ResponseContent = content;
+                
+                // 检查响应类型和内容
+                var contentType = response.Content.Headers.ContentType?.MediaType ?? "";
+                Log($"响应类型: {contentType}");
+                
+                // 解析响应
+                if (contentType.Contains("json"))
+                {
+                    ParseJsonResponse(content, result);
+                }
+                else if (content.Contains("<!DOCTYPE html") || content.Contains("<html"))
+                {
+                    ParseHtmlResponse(content, result);
+                }
+                else
+                {
+                    result.Success = false;
+                    result.Message = "响应格式未知";
+                }
             }
-            else if (content.Contains("<!DOCTYPE html") || content.Contains("<html"))
+            catch (HttpRequestException httpEx)
             {
-                ParseHtmlResponse(content, result);
-            }
-            else
-            {
+                Log($"认证请求HTTP异常: {httpEx.Message}");
+                
+                // 检查内部异常
+                if (httpEx.InnerException is System.Net.Sockets.SocketException socketEx)
+                {
+                    Log($"Socket错误: {socketEx.ErrorCode} ({socketEx.SocketErrorCode})");
+                    if (socketEx.ErrorCode == 10055)
+                    {
+                        Log("检测到Socket缓冲区耗尽错误 (10055 WSAENOBUFS)");
+                        Log("建议: 检查TCP连接数、系统资源和进程句柄");
+                    }
+                }
+                
+                OnNetworkError?.Invoke(httpEx);
+                
                 result.Success = false;
-                result.Message = "响应格式未知";
+                result.Message = $"认证请求失败: {httpEx.Message}";
+                result.Exception = httpEx;
+            }
+            catch (Exception ex)
+            {
+                Log($"认证请求异常: {ex.Message}");
+                OnNetworkError?.Invoke(ex);
+                
+                result.Success = false;
+                result.Message = $"认证请求异常: {ex.Message}";
+                result.Exception = ex;
             }
             
             return result;
