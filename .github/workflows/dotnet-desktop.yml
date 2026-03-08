@@ -70,10 +70,7 @@ jobs:
 
       - name: Install Inno Setup
         shell: pwsh
-        run: |
-          $installer = Join-Path $env:RUNNER_TEMP "innosetup-latest.exe"
-          Invoke-WebRequest -Uri "https://jrsoftware.org/download.php/is.exe?dontcount=1" -OutFile $installer
-          Start-Process -FilePath $installer -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-" -Wait
+        run: choco install innosetup --yes --no-progress
 
       - name: Resolve Inno Setup Compiler
         id: iscc
@@ -81,9 +78,21 @@ jobs:
         run: |
           $paths = @(
             "$Env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe",
-            "$Env:ProgramFiles\Inno Setup 6\ISCC.exe"
+            "$Env:ProgramFiles\Inno Setup 6\ISCC.exe",
+            "$Env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
           )
           $compiler = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $compiler) {
+            $searchRoots = @("$Env:ProgramFiles(x86)", "$Env:ProgramFiles", "$Env:LOCALAPPDATA\Programs")
+            foreach ($root in $searchRoots) {
+              if (Test-Path $root) {
+                $compiler = Get-ChildItem -Path $root -Filter ISCC.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -First 1
+                if ($compiler) {
+                  break
+                }
+              }
+            }
+          }
           if (-not $compiler) {
             throw "ISCC.exe was not found after installing Inno Setup."
           }
