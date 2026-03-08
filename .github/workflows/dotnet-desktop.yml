@@ -35,14 +35,29 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
+      - name: Resolve Build Version
+        id: app_version
+        shell: pwsh
+        run: |
+          if ("${{ github.ref }}".StartsWith("refs/tags/v")) {
+            $version = "${{ github.ref_name }}".TrimStart('v')
+          } else {
+            [xml]$projectXml = Get-Content -Path ".\NetworkMonitor.csproj" -Encoding UTF8
+            $version = $projectXml.Project.PropertyGroup.Version | Select-Object -First 1
+          }
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            throw "Build version could not be resolved."
+          }
+          "value=$version" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
+
       - name: Restore
         run: dotnet restore .\NetworkMonitor.csproj --runtime $env:RUNTIME_ID
 
       - name: Build
-        run: dotnet build .\NetworkMonitor.csproj --configuration $env:BUILD_CONFIGURATION --runtime $env:RUNTIME_ID --no-restore
+        run: dotnet build .\NetworkMonitor.csproj --configuration $env:BUILD_CONFIGURATION --runtime $env:RUNTIME_ID -p:Version=${{ steps.app_version.outputs.value }} -p:InformationalVersion=${{ steps.app_version.outputs.value }} --no-restore
 
       - name: Publish
-        run: dotnet publish .\NetworkMonitor.csproj --configuration $env:BUILD_CONFIGURATION --runtime $env:RUNTIME_ID --self-contained true -p:PublishSingleFile=true --no-restore -o $env:PUBLISH_DIR
+        run: dotnet publish .\NetworkMonitor.csproj --configuration $env:BUILD_CONFIGURATION --runtime $env:RUNTIME_ID --self-contained true -p:PublishSingleFile=true -p:Version=${{ steps.app_version.outputs.value }} -p:InformationalVersion=${{ steps.app_version.outputs.value }} --no-restore -o $env:PUBLISH_DIR
 
       - name: Upload Publish Artifact
         uses: actions/upload-artifact@v4
@@ -67,6 +82,21 @@ jobs:
         uses: actions/setup-dotnet@v4
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Resolve Release Version
+        id: app_version
+        shell: pwsh
+        run: |
+          if ("${{ github.ref }}".StartsWith("refs/tags/v")) {
+            $version = "${{ github.ref_name }}".TrimStart('v')
+          } else {
+            [xml]$projectXml = Get-Content -Path ".\NetworkMonitor.csproj" -Encoding UTF8
+            $version = $projectXml.Project.PropertyGroup.Version | Select-Object -First 1
+          }
+          if ([string]::IsNullOrWhiteSpace($version)) {
+            throw "Release version could not be resolved."
+          }
+          "value=$version" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
 
       - name: Install Inno Setup
         shell: pwsh
@@ -130,13 +160,12 @@ jobs:
       - name: Build Installer
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}".TrimStart('v')
-          .\build-installer.ps1 -Version $version -Configuration $Env:BUILD_CONFIGURATION -Runtime $Env:RUNTIME_ID -InnoSetupCompiler "${{ steps.iscc.outputs.path }}"
+          .\build-installer.ps1 -Version "${{ steps.app_version.outputs.value }}" -Configuration $Env:BUILD_CONFIGURATION -Runtime $Env:RUNTIME_ID -InnoSetupCompiler "${{ steps.iscc.outputs.path }}"
 
       - name: Archive Publish Output
         shell: pwsh
         run: |
-          $version = "${{ github.ref_name }}".TrimStart('v')
+          $version = "${{ steps.app_version.outputs.value }}"
           $zipPath = Join-Path $PWD "NetworkMonitor-$version-${Env:RUNTIME_ID}.zip"
           Compress-Archive -Path "$Env:PUBLISH_DIR\*" -DestinationPath $zipPath -Force
 

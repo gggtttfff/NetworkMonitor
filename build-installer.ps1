@@ -30,7 +30,7 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
 }
 
 Write-Host "[1/3] Publishing application..." -ForegroundColor Cyan
-dotnet publish $projectFile -c $Configuration -r $Runtime --self-contained true -p:PublishSingleFile=true -o $publishDir
+dotnet publish $projectFile -c $Configuration -r $Runtime --self-contained true -p:PublishSingleFile=true -p:Version=$Version -p:InformationalVersion=$Version -o $publishDir
 
 if (!(Test-Path $InnoSetupCompiler)) {
     throw "Inno Setup compiler not found: $InnoSetupCompiler`nInstall Inno Setup 6 or pass -InnoSetupCompiler with a valid ISCC.exe path."
