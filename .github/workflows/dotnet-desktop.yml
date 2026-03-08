@@ -69,7 +69,11 @@ jobs:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
       - name: Install Inno Setup
-        run: winget install JRSoftware.InnoSetup -e --accept-package-agreements --accept-source-agreements
+        shell: pwsh
+        run: |
+          $installer = Join-Path $env:RUNNER_TEMP "innosetup-latest.exe"
+          Invoke-WebRequest -Uri "https://jrsoftware.org/download.php/is.exe?dontcount=1" -OutFile $installer
+          Start-Process -FilePath $installer -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/SP-" -Wait
 
       - name: Resolve Inno Setup Compiler
         id: iscc
