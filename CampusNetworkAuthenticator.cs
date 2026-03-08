@@ -18,10 +18,7 @@ namespace NetworkMonitor
         private readonly string _authServer;
         private readonly string _fallbackAuthServer = "http://172.16.253.121";
         private HttpClient? _httpClient;
-        private static readonly HttpClient _sharedHttpClient = new HttpClient() 
-        { 
-            Timeout = TimeSpan.FromSeconds(10)
-        };
+        private static readonly HttpClient _sharedHttpClient = CreateDirectHttpClient();
 
         public event Action<string>? LogMessage;
         public event Action<Exception>? OnNetworkError;
@@ -57,7 +54,7 @@ namespace NetworkMonitor
                 
                 Log("未认证，开始登录流程...");
                 
-                using var handler = new HttpClientHandler { AllowAutoRedirect = false };
+                using var handler = new HttpClientHandler { AllowAutoRedirect = false, UseProxy = false, Proxy = null };
                 using var httpClient = new HttpClient(handler);
                 _httpClient = httpClient;
                 
@@ -574,6 +571,19 @@ namespace NetworkMonitor
         private void Log(string message)
         {
             LogMessage?.Invoke(message);
+        }
+
+        private static HttpClient CreateDirectHttpClient()
+        {
+            var handler = new HttpClientHandler
+            {
+                UseProxy = false,
+                Proxy = null
+            };
+            return new HttpClient(handler)
+            {
+                Timeout = TimeSpan.FromSeconds(10)
+            };
         }
         
         public void Dispose()

@@ -16,7 +16,9 @@ namespace NetworkMonitor
         public bool ShowNotification { get; set; } = true;
         public bool ShowTrayNotification { get; set; } = true;
         public bool ShowRecoveryNotification { get; set; } = true;
-        public bool AutoStart { get; set; } = false;
+        public bool AutoStart { get; set; } = false; // 开机自启动程序（服务安装状态）
+        public bool AutoStartMonitoring { get; set; } = false; // 打开程序自动开启监控
+        public bool LastMonitoringEnabled { get; set; } = false; // 程序关闭时是否处于监控中
         public bool SaveTestResult { get; set; } = false;
         public string TestResultPath { get; set; } = "test_results";
         public bool EnableTimeRange { get; set; } = false;
@@ -30,6 +32,10 @@ namespace NetworkMonitor
         public bool EnableMonitorTimeRange { get; set; } = false; // 启用监测时间段
         public string MonitorStartTime { get; set; } = "00:00:00"; // 监测开始时间
         public string MonitorEndTime { get; set; } = "23:59:59"; // 监测结束时间
+        public bool EnableAllDayDetection { get; set; } = false; // 监控时间外全天检测开关
+        public int AllDayDetectionInterval { get; set; } = 60; // 监控时间外检测间隔（秒）
+        public bool AllDayAutoLogin { get; set; } = false; // 监控时间外是否自动登录
+        public string ThemeMode { get; set; } = "TechDark"; // 主题模式：TechDark, MintLight
         
         // 登录请求策略
         public string LoginStrategy { get; set; } = "OnlyWhenDisconnected"; // 登录策略：OnlyWhenDisconnected, AlwaysTry, Smart

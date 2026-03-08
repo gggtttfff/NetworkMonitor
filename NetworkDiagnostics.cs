@@ -346,6 +346,11 @@ namespace NetworkMonitor
         public static List<AbnormalProcessWarning> DetectAbnormalProcesses()
         {
             var warnings = new List<AbnormalProcessWarning>();
+            var knownRetryStormProcesses = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                "WeChat",
+                "cloudmusic"
+            };
 
             try
             {
@@ -416,6 +421,22 @@ namespace NetworkMonitor
                             };
                             warning.Suggestions.Add("定期监控此进程的资源使用");
                             warning.Suggestions.Add("注意是否与网络连接问题相关");
+                        }
+                        else if (knownRetryStormProcesses.Contains(processName) &&
+                                 (handleCount > 3000 || workingSet > 1024L * 1024 * 1024))
+                        {
+                            warning = new AbnormalProcessWarning
+                            {
+                                ProcessName = processName,
+                                ProcessId = process.Id,
+                                HandleCount = handleCount,
+                                WorkingSet = workingSet,
+                                WarningLevel = "High",
+                                Description = $"检测到常见重试风暴进程 {processName} 资源占用偏高，断网时可能持续重连影响认证"
+                            };
+                            warning.Suggestions.Add("建议先关闭该进程后再进行校园网认证");
+                            warning.Suggestions.Add("恢复联网后再重新打开该软件");
+                            warning.Suggestions.Add("若频繁出现，建议在软件设置中关闭断线自动重连或后台同步");
                         }
 
                         if (warning != null)

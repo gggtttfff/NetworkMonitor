@@ -1,24 +1,25 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
+using System.Drawing;
 using System.IO;
 using System.Linq;
 using System.Media;
 using System.Net;
-using System.Net.NetworkInformation;
 using System.Net.Http;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Icon = System.Drawing.Icon;
 
 namespace NetworkMonitor
 {
     public class MainForm : Form
     {
-        // Static HttpClient to prevent socket exhaustion
-        private static readonly HttpClient sharedHttpClient = new HttpClient() { Timeout = TimeSpan.FromSeconds(10) };
-        
         private System.Windows.Forms.Timer networkCheckTimer = null!;
+        private System.Windows.Forms.Timer logUpdateTimer = null!;
         private Label statusLabel = null!;
         private Button startButton = null!;
         private Button stopButton = null!;
@@ -28,15 +29,25 @@ namespace NetworkMonitor
         private NumericUpDown intervalInput = null!;
         private NotifyIcon notifyIcon = null!;
         private TextBox logTextBox = null!;
+        private readonly Icon appIcon;
         private bool isMonitoring = false;
         private bool wasConnected = true;
         private CancellationTokenSource? monitoringCts = null;
         private Task? monitoringTask = null;
         private CancellationTokenSource? loginCts = null;
         private Task? loginTask = null;
+        private DateTime lastAutoLoginStartTime = DateTime.MinValue;
+
+        // 日志缓冲区，用于批量更新UI避免卡顿
+        private readonly Queue<string> logBuffer = new Queue<string>();
+        private readonly object logBufferLock = new object();
+        private const int MaxLogLines = 1000;
+        private const int LogUpdateIntervalMs = 100;
         
         // 日志文件 - 使用新的DiagnosticLogger
         private DiagnosticLogger? diagnosticLogger = null;
+        private readonly NetworkConnectionService networkConnectionService;
+        private readonly CampusAutoLoginService campusAutoLoginService;
         
         // 设置项
         private string loginUrl = "http://2.2.2.2";
@@ -46,7 +57,9 @@ namespace NetworkMonitor
         private bool showNotification = true;
         private bool showTrayNotification = true;
         private bool showRecoveryNotification = true;
-        private bool autoStart = false;
+        private bool autoStart = false; // 开机自启动程序（服务安装状态）
+        private bool autoStartMonitoring = false; // 打开程序自动开启监控
+        private bool lastMonitoringEnabled = false; // 上次关闭程序时是否在监控
         private bool saveTestResult = false;
         private string testResultPath = "test_results";
         private bool enableTimeRange = false;
@@ -57,6 +70,10 @@ namespace NetworkMonitor
         private bool enableMonitorTimeRange = false;
         private TimeSpan monitorStartTime = new TimeSpan(0, 0, 0);
         private TimeSpan monitorEndTime = new TimeSpan(23, 59, 59);
+        private bool enableAllDayDetection = false;
+        private int allDayDetectionInterval = 60;
+        private bool allDayAutoLogin = false;
+        private string themeMode = "TechDark";
         private string loginStrategy = "OnlyWhenDisconnected";
         private int loginRetryCount = 3;
         private int loginRetryDelay = 5;
@@ -79,6 +96,15 @@ namespace NetworkMonitor
 
         public MainForm()
         {
+            appIcon = AppIconProvider.GetIcon();
+            networkConnectionService = new NetworkConnectionService(
+                AddLog,
+                (context, ex) => diagnosticLogger?.LogNetworkErrorAsync(context, ex) ?? Task.CompletedTask,
+                (message) => diagnosticLogger?.LogAsync(LogLevel.Warning, message) ?? Task.CompletedTask);
+            campusAutoLoginService = new CampusAutoLoginService(
+                AddLog,
+                (context, ex) => diagnosticLogger?.LogNetworkErrorAsync(context, ex) ?? Task.CompletedTask);
+
             LoadSettings();
             InitializeDiagnosticLogger();
             InitializeComponents();
@@ -97,7 +123,9 @@ namespace NetworkMonitor
                 showNotification = settings.ShowNotification;
                 showTrayNotification = settings.ShowTrayNotification;
                 showRecoveryNotification = settings.ShowRecoveryNotification;
-                autoStart = settings.AutoStart;
+                autoStart = StartupServiceManager.IsInstalled();
+                autoStartMonitoring = settings.AutoStartMonitoring;
+                lastMonitoringEnabled = settings.LastMonitoringEnabled;
                 saveTestResult = settings.SaveTestResult;
                 testResultPath = settings.TestResultPath;
                 enableTimeRange = settings.EnableTimeRange;
@@ -127,6 +155,11 @@ namespace NetworkMonitor
                 {
                     monitorEndTime = parsedMonitorEndTime;
                 }
+                enableAllDayDetection = settings.EnableAllDayDetection;
+                allDayDetectionInterval = Math.Min(Math.Max(settings.AllDayDetectionInterval, 10), 3600);
+                allDayAutoLogin = settings.AllDayAutoLogin;
+                themeMode = string.IsNullOrWhiteSpace(settings.ThemeMode) ? "TechDark" : settings.ThemeMode;
+                UiTheme.Apply(themeMode);
                 
                 // 加载登录策略设置
                 loginStrategy = settings.LoginStrategy;
@@ -154,6 +187,8 @@ namespace NetworkMonitor
                     ShowTrayNotification = showTrayNotification,
                     ShowRecoveryNotification = showRecoveryNotification,
                     AutoStart = autoStart,
+                    AutoStartMonitoring = autoStartMonitoring,
+                    LastMonitoringEnabled = isMonitoring,
                     SaveTestResult = saveTestResult,
                     TestResultPath = testResultPath,
                     EnableTimeRange = enableTimeRange,
@@ -165,6 +200,10 @@ namespace NetworkMonitor
                     EnableMonitorTimeRange = enableMonitorTimeRange,
                     MonitorStartTime = monitorStartTime.ToString(@"hh\:mm\:ss"),
                     MonitorEndTime = monitorEndTime.ToString(@"hh\:mm\:ss"),
+                    EnableAllDayDetection = enableAllDayDetection,
+                    AllDayDetectionInterval = allDayDetectionInterval,
+                    AllDayAutoLogin = allDayAutoLogin,
+                    ThemeMode = themeMode,
                     LoginStrategy = loginStrategy,
                     LoginRetryCount = loginRetryCount,
                     LoginRetryDelay = loginRetryDelay
@@ -172,6 +211,7 @@ namespace NetworkMonitor
                 
                 if (SettingsManager.Save(settings))
                 {
+                    SyncStartupServiceRegistration();
                     AddLog($"设置已保存到: {SettingsManager.GetSettingsFilePath()}");
                     
                     // 如果正在监控中且启用了监测时间段且当前在监测时间段内，立即进行一次网络检测
@@ -183,15 +223,15 @@ namespace NetworkMonitor
                         if (isConnected)
                         {
                             statusLabel.Text = "状态: 网络正常";
-                            statusLabel.ForeColor = System.Drawing.Color.Green;
-                            notifyIcon.Icon = System.Drawing.SystemIcons.Application;
+                            statusLabel.ForeColor = UiTheme.PrimaryGreen;
+                            notifyIcon.Icon = appIcon;
                             notifyIcon.Text = "网络监控工具 - 网络正常";
                         }
                         else
                         {
                             statusLabel.Text = "状态: 网络断开!";
-                            statusLabel.ForeColor = System.Drawing.Color.Red;
-                            notifyIcon.Icon = System.Drawing.SystemIcons.Warning;
+                            statusLabel.ForeColor = UiTheme.Error;
+                            notifyIcon.Icon = appIcon;
                             notifyIcon.Text = "网络监控工具 - 网络断开";
                         }
                     }
@@ -214,23 +254,13 @@ namespace NetworkMonitor
                 // 创建诊断日志记录器
                 diagnosticLogger = new DiagnosticLogger();
                 
-                // 订阅日志事件以更新UI
+                // 订阅日志事件以更新UI（使用缓冲区避免卡顿）
                 diagnosticLogger.OnLogMessage += (message) =>
                 {
-                    if (logTextBox.InvokeRequired)
+                    // 将消息加入缓冲区，不直接更新UI
+                    lock (logBufferLock)
                     {
-                        logTextBox.Invoke(new Action(() =>
-                        {
-                            logTextBox.AppendText($"{message}\r\n");
-                            logTextBox.SelectionStart = logTextBox.Text.Length;
-                            logTextBox.ScrollToCaret();
-                        }));
-                    }
-                    else
-                    {
-                        logTextBox.AppendText($"{message}\r\n");
-                        logTextBox.SelectionStart = logTextBox.Text.Length;
-                        logTextBox.ScrollToCaret();
+                        logBuffer.Enqueue(message);
                     }
                 };
                 
@@ -282,20 +312,25 @@ namespace NetworkMonitor
         private void InitializeComponents()
         {
             this.Text = "网络监控工具";
-            this.Size = new System.Drawing.Size(620, 500);
+            this.Size = new System.Drawing.Size(1080, 760);
+            this.MinimumSize = new System.Drawing.Size(980, 680);
             this.StartPosition = FormStartPosition.CenterScreen;
+            this.Icon = appIcon;
+            this.BackColor = UiTheme.BgDarkest;
 
             // 初始化系统托盘图标
             notifyIcon = new NotifyIcon
             {
                 Text = "网络监控工具",
                 Visible = true,
-                Icon = System.Drawing.SystemIcons.Application
+                Icon = appIcon
             };
             notifyIcon.DoubleClick += NotifyIcon_DoubleClick;
 
             // 创建托盘菜单
             var contextMenu = new ContextMenuStrip();
+            contextMenu.BackColor = UiTheme.BgDark;
+            contextMenu.ForeColor = UiTheme.TextPrimary;
             var showMenuItem = new ToolStripMenuItem("显示主窗口");
             showMenuItem.Click += (s, e) => ShowMainWindow();
             var exitMenuItem = new ToolStripMenuItem("退出");
@@ -305,56 +340,239 @@ namespace NetworkMonitor
             contextMenu.Items.Add(exitMenuItem);
             notifyIcon.ContextMenuStrip = contextMenu;
 
-            Label titleLabel = new Label
+            var rootPanel = new Panel
             {
-                Text = "网络状态监控",
-                Location = new System.Drawing.Point(20, 20),
-                Size = new System.Drawing.Size(350, 25),
-                Font = new System.Drawing.Font("微软雅黑", 12, System.Drawing.FontStyle.Bold)
+                Dock = DockStyle.Fill,
+                BackColor = UiTheme.BgDarkest
+            };
+
+            var sideBar = new Panel
+            {
+                Dock = DockStyle.Left,
+                Width = 240,
+                BackColor = UiTheme.BgDark
+            };
+
+            var sideHeader = new Label
+            {
+                Text = "网络监控工具",
+                Dock = DockStyle.Top,
+                Height = 70,
+                Padding = new Padding(16, 24, 0, 0),
+                Font = new System.Drawing.Font("微软雅黑", 15, FontStyle.Bold),
+                ForeColor = UiTheme.TextPrimary
+            };
+
+            var navLabel = new Label
+            {
+                Text = "功能分类",
+                Dock = DockStyle.Top,
+                Height = 30,
+                Padding = new Padding(16, 8, 0, 0),
+                Font = new System.Drawing.Font("微软雅黑", 9),
+                ForeColor = UiTheme.TextSecondary
+            };
+
+            Button navServerButton = new Button
+            {
+                Text = "监控中心",
+                Dock = DockStyle.Top,
+                Height = 42,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = UiTheme.Panel,
+                ForeColor = UiTheme.TextPrimary,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(16, 0, 0, 0)
+            };
+            navServerButton.FlatAppearance.BorderColor = UiTheme.Border;
+
+            Button navIntegrationButton = new Button
+            {
+                Text = "认证登录",
+                Dock = DockStyle.Top,
+                Height = 42,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = UiTheme.BgDark,
+                ForeColor = UiTheme.TextPrimary,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(16, 0, 0, 0)
+            };
+            navIntegrationButton.FlatAppearance.BorderColor = UiTheme.Border;
+
+            Button navLogButton = new Button
+            {
+                Text = "网络诊断",
+                Dock = DockStyle.Top,
+                Height = 42,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = UiTheme.BgDark,
+                ForeColor = UiTheme.TextPrimary,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(16, 0, 0, 0)
+            };
+            navLogButton.FlatAppearance.BorderColor = UiTheme.Border;
+
+            settingsButton = new Button
+            {
+                Text = "设置",
+                Dock = DockStyle.Bottom,
+                Height = 46,
+                FlatStyle = FlatStyle.Flat,
+                BackColor = UiTheme.BgDark,
+                ForeColor = UiTheme.TextPrimary,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(16, 0, 0, 0)
+            };
+            settingsButton.FlatAppearance.BorderColor = UiTheme.Border;
+            settingsButton.Click += SettingsButton_Click;
+
+            sideBar.Controls.Add(settingsButton);
+            sideBar.Controls.Add(navLogButton);
+            sideBar.Controls.Add(navIntegrationButton);
+            sideBar.Controls.Add(navServerButton);
+            sideBar.Controls.Add(navLabel);
+            sideBar.Controls.Add(sideHeader);
+
+            var rightPanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = UiTheme.BgDarkest
+            };
+
+            var topBar = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 62,
+                BackColor = UiTheme.BgDark
+            };
+
+            var topTitle = new Label
+            {
+                Text = "监控中心",
+                Location = new Point(16, 18),
+                Size = new Size(180, 28),
+                Font = new Font("微软雅黑", 12, FontStyle.Regular),
+                ForeColor = UiTheme.TextPrimary
+            };
+
+            var searchBox = new TextBox
+            {
+                Location = new Point(230, 18),
+                Size = new Size(220, 28),
+                Text = "搜索",
+                BorderStyle = BorderStyle.FixedSingle,
+                BackColor = UiTheme.Panel,
+                ForeColor = UiTheme.TextSecondary
+            };
+
+            var listModeBtn = new Button
+            {
+                Text = "≡",
+                Location = new Point(470, 16),
+                Size = new Size(32, 32),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = UiTheme.Panel,
+                ForeColor = UiTheme.TextPrimary
+            };
+            listModeBtn.FlatAppearance.BorderColor = UiTheme.Border;
+
+            var gridModeBtn = new Button
+            {
+                Text = "▦",
+                Location = new Point(508, 16),
+                Size = new Size(32, 32),
+                FlatStyle = FlatStyle.Flat,
+                BackColor = UiTheme.BgDark,
+                ForeColor = UiTheme.TextPrimary
+            };
+            gridModeBtn.FlatAppearance.BorderColor = UiTheme.Border;
+
+            topBar.Controls.Add(topTitle);
+            topBar.Controls.Add(searchBox);
+            topBar.Controls.Add(listModeBtn);
+            topBar.Controls.Add(gridModeBtn);
+
+            var contentHost = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Padding = new Padding(18, 14, 18, 18),
+                BackColor = UiTheme.BgDarkest
+            };
+
+            var cardPanel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = UiTheme.Panel,
+                BorderStyle = BorderStyle.FixedSingle,
+                Padding = new Padding(16, 14, 16, 16)
+            };
+
+            var cardTitle = new Label
+            {
+                Text = "网络检测程序",
+                Dock = DockStyle.Top,
+                Height = 34,
+                Font = new Font("微软雅黑", 12, FontStyle.Bold),
+                ForeColor = UiTheme.TextPrimary
             };
 
             statusLabel = new Label
             {
                 Text = "状态: 未启动",
-                Location = new System.Drawing.Point(20, 60),
-                Size = new System.Drawing.Size(350, 30),
-                Font = new System.Drawing.Font("微软雅黑", 10)
+                Dock = DockStyle.Top,
+                Height = 28,
+                Font = new Font("微软雅黑", 10),
+                ForeColor = UiTheme.TextSecondary
             };
-            
-            // 上次断开时间
+
             lastDisconnectLabel = new Label
             {
                 Text = "上次断开: 无",
-                Location = new System.Drawing.Point(380, 60),
-                Size = new System.Drawing.Size(220, 20),
-                Font = new System.Drawing.Font("微软雅黑", 8.5f)
+                Dock = DockStyle.Top,
+                Height = 24,
+                Font = new Font("微软雅黑", 9),
+                ForeColor = UiTheme.TextSecondary
             };
-            
-            // 上次登录时间
+
             lastLoginAttemptLabel = new Label
             {
                 Text = "上次登录: 无",
-                Location = new System.Drawing.Point(380, 80),
-                Size = new System.Drawing.Size(220, 20),
-                Font = new System.Drawing.Font("微软雅黑", 8.5f)
+                Dock = DockStyle.Top,
+                Height = 24,
+                Font = new Font("微软雅黑", 9),
+                ForeColor = UiTheme.TextSecondary
+            };
+
+            var actionPanel = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                Height = 90,
+                AutoSize = false,
+                WrapContents = true,
+                FlowDirection = FlowDirection.LeftToRight,
+                Padding = new Padding(0, 6, 0, 0),
+                BackColor = UiTheme.Panel
             };
 
             Label intervalLabel = new Label
             {
                 Text = "检查间隔(秒):",
-                Location = new System.Drawing.Point(20, 100),
-                Size = new System.Drawing.Size(100, 25)
+                AutoSize = false,
+                Size = new Size(100, 34),
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = UiTheme.TextSecondary
             };
 
             intervalInput = new NumericUpDown
             {
-                Location = new System.Drawing.Point(130, 100),
-                Size = new System.Drawing.Size(80, 25),
+                Size = new Size(80, 34),
                 Minimum = 1,
                 Maximum = 300,
-                Value = 5
+                Value = 5,
+                BackColor = UiTheme.BgDark,
+                ForeColor = UiTheme.TextPrimary
             };
-            
+
             // 应用已保存的检查间隔
             try
             {
@@ -369,105 +587,125 @@ namespace NetworkMonitor
             startButton = new Button
             {
                 Text = "启动监控",
-                Location = new System.Drawing.Point(20, 150),
-                Size = new System.Drawing.Size(100, 35)
+                Size = new Size(110, 34),
+                BackColor = UiTheme.PrimaryGreen,
+                ForeColor = UiTheme.TextPrimary,
+                FlatStyle = FlatStyle.Flat
             };
+            startButton.FlatAppearance.BorderColor = UiTheme.DeepGreen;
             startButton.Click += StartButton_Click;
 
             stopButton = new Button
             {
                 Text = "停止监控",
-                Location = new System.Drawing.Point(140, 150),
-                Size = new System.Drawing.Size(100, 35),
-                Enabled = false
+                Size = new Size(110, 34),
+                Enabled = false,
+                BackColor = UiTheme.Error,
+                ForeColor = UiTheme.TextPrimary,
+                FlatStyle = FlatStyle.Flat
             };
+            stopButton.FlatAppearance.BorderColor = UiTheme.Border;
             stopButton.Click += StopButton_Click;
-
-            settingsButton = new Button
-            {
-                Text = "设置",
-                Location = new System.Drawing.Point(260, 150),
-                Size = new System.Drawing.Size(100, 35)
-            };
-            settingsButton.Click += SettingsButton_Click;
 
             testButton = new Button
             {
                 Text = "测试访问",
-                Location = new System.Drawing.Point(380, 150),
-                Size = new System.Drawing.Size(100, 35)
+                Size = new Size(110, 34),
+                BackColor = UiTheme.Info,
+                ForeColor = UiTheme.TextPrimary,
+                FlatStyle = FlatStyle.Flat
             };
+            testButton.FlatAppearance.BorderColor = UiTheme.Border;
             testButton.Click += TestButton_Click;
 
             loginTestButton = new Button
             {
                 Text = "测试登录",
-                Location = new System.Drawing.Point(500, 150),
-                Size = new System.Drawing.Size(100, 35)
+                Size = new Size(110, 34),
+                BackColor = UiTheme.DeepGreen,
+                ForeColor = UiTheme.TextPrimary,
+                FlatStyle = FlatStyle.Flat
             };
+            loginTestButton.FlatAppearance.BorderColor = UiTheme.Border;
             loginTestButton.Click += LoginTestButton_Click;
 
-            // 系统网络状态按钮
             Button systemStatusButton = new Button
             {
                 Text = "系统网络状态",
-                Location = new System.Drawing.Point(380, 195),
-                Size = new System.Drawing.Size(110, 30),
-                Font = new System.Drawing.Font("微软雅黑", 9)
+                Size = new Size(130, 34),
+                BackColor = UiTheme.BgDark,
+                ForeColor = UiTheme.TextPrimary,
+                FlatStyle = FlatStyle.Flat
             };
+            systemStatusButton.FlatAppearance.BorderColor = UiTheme.Border;
             systemStatusButton.Click += SystemStatusButton_Click;
-            
-            // 异常进程检测按钮
+
             Button abnormalProcessButton = new Button
             {
                 Text = "检测异常进程",
-                Location = new System.Drawing.Point(500, 195),
-                Size = new System.Drawing.Size(110, 30),
-                Font = new System.Drawing.Font("微软雅黑", 9)
+                Size = new Size(130, 34),
+                BackColor = UiTheme.Warning,
+                ForeColor = UiTheme.TextPrimary,
+                FlatStyle = FlatStyle.Flat
             };
+            abnormalProcessButton.FlatAppearance.BorderColor = UiTheme.Border;
             abnormalProcessButton.Click += AbnormalProcessButton_Click;
 
-            // 日志显示区域
+            actionPanel.Controls.Add(intervalLabel);
+            actionPanel.Controls.Add(intervalInput);
+            actionPanel.Controls.Add(startButton);
+            actionPanel.Controls.Add(stopButton);
+            actionPanel.Controls.Add(testButton);
+            actionPanel.Controls.Add(loginTestButton);
+            actionPanel.Controls.Add(systemStatusButton);
+            actionPanel.Controls.Add(abnormalProcessButton);
+
             Label logLabel = new Label
             {
-                Text = "运行日志:",
-                Location = new System.Drawing.Point(20, 200),
-                Size = new System.Drawing.Size(100, 25),
-                Font = new System.Drawing.Font("微软雅黑", 10, System.Drawing.FontStyle.Bold)
+                Text = "运行日志",
+                Dock = DockStyle.Top,
+                Height = 30,
+                Font = new Font("微软雅黑", 10, FontStyle.Bold),
+                ForeColor = UiTheme.TextPrimary
             };
 
             logTextBox = new TextBox
             {
-                Location = new System.Drawing.Point(20, 230),
-                Size = new System.Drawing.Size(540, 200),
+                Dock = DockStyle.Fill,
                 Multiline = true,
                 ScrollBars = ScrollBars.Vertical,
                 ReadOnly = true,
-                BackColor = System.Drawing.Color.White,
-                Font = new System.Drawing.Font("微软雅黑", 9)
+                BackColor = UiTheme.BgDark,
+                ForeColor = UiTheme.TextPrimary,
+                BorderStyle = BorderStyle.FixedSingle,
+                Font = new Font("Consolas", 9)
             };
 
-            this.Controls.AddRange(new Control[] {
-                titleLabel,
-                statusLabel,
-                lastDisconnectLabel,
-                lastLoginAttemptLabel,
-                intervalLabel,
-                intervalInput,
-                startButton,
-                stopButton,
-                settingsButton,
-                testButton,
-                loginTestButton,
-                systemStatusButton,
-                abnormalProcessButton,
-                logLabel,
-                logTextBox
-            });
+            cardPanel.Controls.Add(logTextBox);
+            cardPanel.Controls.Add(logLabel);
+            cardPanel.Controls.Add(actionPanel);
+            cardPanel.Controls.Add(lastLoginAttemptLabel);
+            cardPanel.Controls.Add(lastDisconnectLabel);
+            cardPanel.Controls.Add(statusLabel);
+            cardPanel.Controls.Add(cardTitle);
+
+            contentHost.Controls.Add(cardPanel);
+            rightPanel.Controls.Add(contentHost);
+            rightPanel.Controls.Add(topBar);
+
+            rootPanel.Controls.Add(rightPanel);
+            rootPanel.Controls.Add(sideBar);
+            this.Controls.Add(rootPanel);
 
             // 初始化定时器（保留以便向后兼容）
             networkCheckTimer = new System.Windows.Forms.Timer();
             timeRangeCheckTimer = new System.Windows.Forms.Timer();
+
+            // 初始化日志更新定时器（用于批量更新UI避免卡顿）
+            logUpdateTimer = new System.Windows.Forms.Timer();
+            logUpdateTimer.Interval = LogUpdateIntervalMs;
+            logUpdateTimer.Tick += LogUpdateTimer_Tick;
+            logUpdateTimer.Start();
 
             // 窗口事件
             this.Resize += MainForm_Resize;
@@ -479,24 +717,130 @@ namespace NetworkMonitor
 
         private async void MainForm_Load(object? sender, EventArgs e)
         {
-            // 如果启用了监测时间段且当前在时间段内，自动启动监控
-            if (enableMonitorTimeRange && IsInMonitorTimeRange())
+            bool shouldAutoStartMonitoring = autoStartMonitoring || lastMonitoringEnabled;
+            if (shouldAutoStartMonitoring)
             {
-                AddLog("当前在监测时间段内，自动启动监控...");
+                string reason = autoStartMonitoring ? "已启用“打开程序自动开启监控”" : "恢复上次关闭前的监控状态";
+                AddLog($"{reason}，自动启动监控...");
                 await AutoStartMonitoring();
             }
         }
-        
-        private void MainForm_Resize(object? sender, EventArgs e)
+
+        private void SyncStartupServiceRegistration()
         {
-            if (this.WindowState == FormWindowState.Minimized)
+            try
             {
-                this.Hide();
-                if (showTrayNotification)
+                bool installed = StartupServiceManager.IsInstalled();
+                if (autoStart && !installed)
                 {
-                    ShowBalloonTipWithSound(1000, "网络监控工具", "程序已最小化到系统托盘", ToolTipIcon.Info);
+                    if (StartupServiceManager.Install(Application.ExecutablePath, out string installMsg))
+                    {
+                        AddLog(installMsg);
+                    }
+                    else
+                    {
+                        AddLog(installMsg);
+                        autoStart = false;
+                    }
+                }
+                else if (!autoStart && installed)
+                {
+                    if (StartupServiceManager.Uninstall(out string uninstallMsg))
+                    {
+                        AddLog(uninstallMsg);
+                    }
+                    else
+                    {
+                        AddLog(uninstallMsg);
+                    }
                 }
             }
+            catch (Exception ex)
+            {
+                AddLog($"同步开机启动服务失败: {ex.Message}");
+            }
+        }
+        
+        private void LogUpdateTimer_Tick(object? sender, EventArgs e)
+        {
+            // 窗口隐藏时暂停UI更新，避免不必要的性能开销
+            if (!this.Visible || this.WindowState == FormWindowState.Minimized)
+            {
+                // 清空缓冲区，只保留文件日志
+                lock (logBufferLock)
+                {
+                    logBuffer.Clear();
+                }
+                return;
+            }
+
+            List<string> messagesToProcess = new List<string>();
+            lock (logBufferLock)
+            {
+                while (logBuffer.Count > 0 && messagesToProcess.Count < 100)
+                {
+                    messagesToProcess.Add(logBuffer.Dequeue());
+                }
+            }
+
+            if (messagesToProcess.Count == 0)
+            {
+                return;
+            }
+
+            // 批量更新UI
+            if (logTextBox.InvokeRequired)
+            {
+                logTextBox.Invoke(new Action(() =>
+                {
+                    BatchAppendLogMessages(messagesToProcess);
+                }));
+            }
+            else
+            {
+                BatchAppendLogMessages(messagesToProcess);
+            }
+        }
+
+        private void BatchAppendLogMessages(List<string> messages)
+        {
+            // 暂停重绘以提高性能
+            logTextBox.SuspendLayout();
+
+            try
+            {
+                // 批量添加消息
+                StringBuilder sb = new StringBuilder();
+                foreach (var message in messages)
+                {
+                    sb.AppendLine(message);
+                }
+                logTextBox.AppendText(sb.ToString());
+
+                // 限制行数，避免内存无限增长
+                int currentLines = logTextBox.Lines.Length;
+                if (currentLines > MaxLogLines)
+                {
+                    int linesToRemove = currentLines - MaxLogLines;
+                    int index = logTextBox.GetFirstCharIndexFromLine(linesToRemove);
+                    logTextBox.Select(0, index);
+                    logTextBox.SelectedText = "";
+                }
+
+                // 滚动到底部
+                logTextBox.SelectionStart = logTextBox.Text.Length;
+                logTextBox.ScrollToCaret();
+            }
+            finally
+            {
+                logTextBox.ResumeLayout();
+            }
+        }
+
+        private void MainForm_Resize(object? sender, EventArgs e)
+        {
+            // 最小化到任务栏时，不再自动隐藏到托盘
+            // 只有点击关闭按钮（X）时才会隐藏到托盘
         }
 
         private void NotifyIcon_DoubleClick(object? sender, EventArgs e)
@@ -509,12 +853,15 @@ namespace NetworkMonitor
             this.Show();
             this.WindowState = FormWindowState.Normal;
             this.BringToFront();
+            this.Activate();
         }
 
         private void ExitApplication()
         {
+            PersistMonitoringStateForNextLaunch();
             isMonitoring = false;
             networkCheckTimer.Stop();
+            logUpdateTimer.Stop();
             notifyIcon.Visible = false;
             diagnosticLogger?.Dispose();
             Application.Exit();
@@ -530,6 +877,27 @@ namespace NetworkMonitor
                 {
                     ShowBalloonTipWithSound(1000, "网络监控工具", "程序仍在后台运行", ToolTipIcon.Info);
                 }
+            }
+            else
+            {
+                PersistMonitoringStateForNextLaunch();
+            }
+        }
+
+        private void PersistMonitoringStateForNextLaunch()
+        {
+            try
+            {
+                var settings = SettingsManager.Load();
+                settings.LastMonitoringEnabled = isMonitoring;
+                if (!SettingsManager.Save(settings))
+                {
+                    AddLog("保存上次监控状态失败");
+                }
+            }
+            catch (Exception ex)
+            {
+                AddLog($"保存上次监控状态异常: {ex.Message}");
             }
         }
 
@@ -547,16 +915,25 @@ namespace NetworkMonitor
             intervalInput.Enabled = false;
 
             statusLabel.Text = "状态: 监控中...";
-            statusLabel.ForeColor = System.Drawing.Color.Green;
+            statusLabel.ForeColor = UiTheme.PrimaryGreen;
             
             AddLog("监控已自动启动，检查间隔: " + intervalInput.Value + "秒");
             
             // 创建新的取消令牌
             monitoringCts = new CancellationTokenSource();
             
-            // 立即进行一次网络检测
-            AddLog("立即执行首次检测...");
-            await CheckNetworkAndUpdateStatus();
+            // 检查是否在监测时间段内并执行首次检测
+            if (!enableMonitorTimeRange || IsInMonitorTimeRange())
+            {
+                AddLog("立即执行首次检测...");
+                await CheckNetworkAndUpdateStatus();
+            }
+            else
+            {
+                AddLog("当前不在监测时间段内，等待进入时间段");
+                statusLabel.Text = "状态: 监控中(时间段外)";
+                statusLabel.ForeColor = UiTheme.TextSecondary;
+            }
             
             // 启动后台监控任务
             monitoringTask = RunMonitoringLoopAsync(monitoringCts.Token);
@@ -565,12 +942,13 @@ namespace NetworkMonitor
         private async void StartButton_Click(object? sender, EventArgs e)
         {
             isMonitoring = true;
+            lastMonitoringEnabled = true;
             startButton.Enabled = false;
             stopButton.Enabled = true;
             intervalInput.Enabled = false;
 
             statusLabel.Text = "状态: 监控中...";
-            statusLabel.ForeColor = System.Drawing.Color.Green;
+            statusLabel.ForeColor = UiTheme.PrimaryGreen;
             
             AddLog("监控已启动，检查间隔: " + intervalInput.Value + "秒");
             
@@ -587,7 +965,7 @@ namespace NetworkMonitor
             {
                 AddLog("当前不在监测时间段内，等待进入时间段");
                 statusLabel.Text = "状态: 监控中(时间段外)";
-                statusLabel.ForeColor = System.Drawing.Color.Gray;
+                statusLabel.ForeColor = UiTheme.TextSecondary;
             }
             
             // 启动后台监控任务
@@ -597,6 +975,7 @@ namespace NetworkMonitor
         private async void StopButton_Click(object? sender, EventArgs e)
         {
             isMonitoring = false;
+            lastMonitoringEnabled = false;
             
             // 取消登录任务
             if (loginCts != null && !loginCts.Token.IsCancellationRequested)
@@ -645,7 +1024,7 @@ namespace NetworkMonitor
             timeRangeCheckTimer?.Stop();
 
             statusLabel.Text = "状态: 已停止";
-            statusLabel.ForeColor = System.Drawing.Color.Gray;
+            statusLabel.ForeColor = UiTheme.TextSecondary;
             
             AddLog("监控已停止");
         }
@@ -665,6 +1044,8 @@ namespace NetworkMonitor
                 ShowTrayNotification = showTrayNotification,
                 ShowRecoveryNotification = showRecoveryNotification,
                 AutoStart = autoStart,
+                AutoStartMonitoring = autoStartMonitoring,
+                LastMonitoringEnabled = isMonitoring,
                 SaveTestResult = saveTestResult,
                 TestResultPath = testResultPath,
                 EnableTimeRange = enableTimeRange,
@@ -674,6 +1055,10 @@ namespace NetworkMonitor
                 EnableMonitorTimeRange = enableMonitorTimeRange,
                 MonitorStartTime = monitorStartTime.ToString(@"hh\:mm\:ss"),
                 MonitorEndTime = monitorEndTime.ToString(@"hh\:mm\:ss"),
+                EnableAllDayDetection = enableAllDayDetection,
+                AllDayDetectionInterval = allDayDetectionInterval,
+                AllDayAutoLogin = allDayAutoLogin,
+                ThemeMode = themeMode,
                 LoginStrategy = loginStrategy,
                 LoginRetryCount = loginRetryCount,
                 LoginRetryDelay = loginRetryDelay
@@ -682,6 +1067,7 @@ namespace NetworkMonitor
             var settingsForm = new SettingsForm(currentSettings);
             if (settingsForm.ShowDialog() == DialogResult.OK)
             {
+                bool themeChanged = !string.Equals(themeMode, settingsForm.ThemeMode, StringComparison.Ordinal);
                 loginUrl = settingsForm.LoginUrl;
                 primaryDns = settingsForm.PrimaryDns;
                 secondaryDns = settingsForm.SecondaryDns;
@@ -692,6 +1078,7 @@ namespace NetworkMonitor
                 showTrayNotification = settingsForm.ShowTrayNotification;
                 showRecoveryNotification = settingsForm.ShowRecoveryNotification;
                 autoStart = settingsForm.AutoStart;
+                autoStartMonitoring = settingsForm.AutoStartMonitoring;
                 saveTestResult = settingsForm.SaveTestResult;
                 testResultPath = settingsForm.TestResultPath;
                 enableTimeRange = settingsForm.EnableTimeRange;
@@ -700,6 +1087,10 @@ namespace NetworkMonitor
                 enableMonitorTimeRange = settingsForm.EnableMonitorTimeRange;
                 monitorStartTime = settingsForm.MonitorStartTime;
                 monitorEndTime = settingsForm.MonitorEndTime;
+                enableAllDayDetection = settingsForm.EnableAllDayDetection;
+                allDayDetectionInterval = settingsForm.AllDayDetectionInterval;
+                allDayAutoLogin = settingsForm.AllDayAutoLogin;
+                themeMode = settingsForm.ThemeMode;
                 loginStrategy = settingsForm.LoginStrategy;
                 loginRetryCount = settingsForm.LoginRetryCount;
                 loginRetryDelay = settingsForm.LoginRetryDelay;
@@ -707,7 +1098,14 @@ namespace NetworkMonitor
                 // 保存设置到文件
                 SaveSettings();
                 
-                MessageBox.Show("设置已保存", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                if (themeChanged)
+                {
+                    MessageBox.Show("设置已保存，主题将在下次启动时生效。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                else
+                {
+                    MessageBox.Show("设置已保存", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
                 AddLog($"设置已更新: {loginUrl}, DNS: {primaryDns}/{secondaryDns}, 用户名: {username}, 重试{loginRetryCount}次");
             }
         }
@@ -790,13 +1188,13 @@ namespace NetworkMonitor
                     {
                         AddLog("已连接校园网 - 认证成功");
                         statusLabel.Text = "状态: 已连接校园网";
-                        statusLabel.ForeColor = System.Drawing.Color.Green;
+                        statusLabel.ForeColor = UiTheme.PrimaryGreen;
                     }
                     else
                     {
                         AddLog("未连接校园网 - 需要认证");
                         statusLabel.Text = "状态: 未认证";
-                        statusLabel.ForeColor = System.Drawing.Color.Orange;
+                        statusLabel.ForeColor = UiTheme.Warning;
                     }
 
                     AddLog($"测试完成 - 状态码: {(int)response.StatusCode} {response.StatusCode}");
@@ -850,14 +1248,19 @@ namespace NetworkMonitor
         
         private async Task RunMonitoringLoopAsync(CancellationToken cancellationToken)
         {
-            int interval = (int)intervalInput.Value * 1000;
-            
             while (!cancellationToken.IsCancellationRequested)
             {
                 try
                 {
+                    bool outsideMonitorRangeBeforeDelay = enableMonitorTimeRange && !IsInMonitorTimeRange();
+                    int intervalMs = (int)intervalInput.Value * 1000;
+                    if (outsideMonitorRangeBeforeDelay && enableAllDayDetection)
+                    {
+                        intervalMs = allDayDetectionInterval * 1000;
+                    }
+
                     // 等待指定间隔
-                    await Task.Delay(interval, cancellationToken);
+                    await Task.Delay(intervalMs, cancellationToken);
                     
                     if (cancellationToken.IsCancellationRequested)
                         break;
@@ -865,6 +1268,17 @@ namespace NetworkMonitor
                     // 检查是否在监测时间段内
                     if (enableMonitorTimeRange && !IsInMonitorTimeRange())
                     {
+                        if (enableAllDayDetection)
+                        {
+                            if (statusLabel.Text == "状态: 监控中(时间段外)")
+                            {
+                                AddLog($"时间段外全天检测中，间隔: {allDayDetectionInterval}秒");
+                            }
+
+                            await CheckNetworkAndUpdateStatus(allDayAutoLogin);
+                            continue;
+                        }
+
                         // 如果之前在时间段内，现在离开了
                         if (statusLabel.Text != "状态: 监控中(时间段外)")
                         {
@@ -872,7 +1286,7 @@ namespace NetworkMonitor
                             statusLabel.BeginInvoke(new Action(() => 
                             {
                                 statusLabel.Text = "状态: 监控中(时间段外)";
-                                statusLabel.ForeColor = System.Drawing.Color.Gray;
+                                statusLabel.ForeColor = UiTheme.TextSecondary;
                             }));
                         }
                         continue;
@@ -899,7 +1313,7 @@ namespace NetworkMonitor
             }
         }
         
-        private async Task CheckNetworkAndUpdateStatus()
+        private async Task CheckNetworkAndUpdateStatus(bool allowAutoLogin = true)
         {
             bool isConnected = await CheckNetworkConnectionAsync();
 
@@ -908,9 +1322,9 @@ namespace NetworkMonitor
                 statusLabel.BeginInvoke(new Action(() => 
                 {
                     statusLabel.Text = "状态: 网络正常";
-                    statusLabel.ForeColor = System.Drawing.Color.Green;
+                    statusLabel.ForeColor = UiTheme.PrimaryGreen;
                 }));
-                notifyIcon.Icon = System.Drawing.SystemIcons.Application;
+                notifyIcon.Icon = appIcon;
                 notifyIcon.Text = "网络监控工具 - 网络正常";
                 
                 // 网络恢复
@@ -929,9 +1343,9 @@ namespace NetworkMonitor
                 statusLabel.BeginInvoke(new Action(() => 
                 {
                     statusLabel.Text = "状态: 网络断开!";
-                    statusLabel.ForeColor = System.Drawing.Color.Red;
+                    statusLabel.ForeColor = UiTheme.Error;
                 }));
-                notifyIcon.Icon = System.Drawing.SystemIcons.Warning;
+                notifyIcon.Icon = appIcon;
                 notifyIcon.Text = "网络监控工具 - 网络断开";
 
                 // 网络断开处理
@@ -953,8 +1367,27 @@ namespace NetworkMonitor
                 }
                 
                 // 检查是否在允许的时间段内，并尝试自动登录
-                if (IsInAllowedTimeRange())
+                if (allowAutoLogin && IsInAllowedTimeRange())
                 {
+                    var blockingWarnings = NetworkDiagnostics.DetectAbnormalProcesses()
+                        .Where(w => w.WarningLevel == "Critical" ||
+                                    ((w.WarningLevel == "High" || w.WarningLevel == "Critical") &&
+                                     (string.Equals(w.ProcessName, "WeChat", StringComparison.OrdinalIgnoreCase) ||
+                                      string.Equals(w.ProcessName, "cloudmusic", StringComparison.OrdinalIgnoreCase))))
+                        .ToList();
+                    if (blockingWarnings.Any())
+                    {
+                        var top = blockingWarnings.First();
+                        AddLog($"检测到关键资源占用进程: {top.ProcessName} (PID:{top.ProcessId}, 句柄:{top.HandleCount:N0})，暂缓自动登录");
+                        if (showTrayNotification)
+                        {
+                            ShowBalloonTipWithSound(4000, "资源占用过高", 
+                                $"{top.ProcessName} 占用较高，建议先关闭后再认证", 
+                                ToolTipIcon.Warning);
+                        }
+                        return;
+                    }
+
                     // 自动登录校园网（每次检测到断开都尝试）
                     _ = AutoLoginAsync(); // 异步执行，不阻塞
                 }
@@ -1070,7 +1503,10 @@ namespace NetworkMonitor
             catch (Exception ex)
             {
                 AddLog($"检测异常进程失败: {ex.Message}");
-                await diagnosticLogger?.LogErrorAsync("检测异常进程失败", ex)!;
+                if (diagnosticLogger != null)
+                {
+                    await diagnosticLogger.LogErrorAsync("检测异常进程失败", ex);
+                }
             }
             
             AddLog("===== 检测完成 =====");
@@ -1087,7 +1523,10 @@ namespace NetworkMonitor
                 process.WaitForExit(5000); // 等待最多5秒
                 
                 AddLog($"✓ 进程 {warning.ProcessName} 已成功关闭（包括所有后台服务）");
-                await diagnosticLogger?.LogInfoAsync($"用户手动关闭异常进程: {warning.ProcessName} (句柄数: {warning.HandleCount:N0})")!;
+                if (diagnosticLogger != null)
+                {
+                    await diagnosticLogger.LogInfoAsync($"用户手动关闭异常进程: {warning.ProcessName} (句柄数: {warning.HandleCount:N0})");
+                }
                 
                 // 等待一下让系统释放资源
                 await Task.Delay(1000);
@@ -1124,7 +1563,10 @@ namespace NetworkMonitor
             catch (Exception ex)
             {
                 AddLog($"✗ 关闭进程失败: {ex.Message}");
-                await diagnosticLogger?.LogErrorAsync($"关闭异常进程失败: {warning.ProcessName}", ex)!;
+                if (diagnosticLogger != null)
+                {
+                    await diagnosticLogger.LogErrorAsync($"关闭异常进程失败: {warning.ProcessName}", ex);
+                }
                 
                 string errorMsg = $"无法关闭进程: {ex.Message}\n\n" +
                                 "请尝试：\n" +
@@ -1147,83 +1589,14 @@ namespace NetworkMonitor
             {
                 // 生成完整的诊断报告
                 var diagnosticReport = await NetworkDiagnostics.GenerateFullReportAsync();
-                
-                // 格式化报告
-                string reportText = NetworkDiagnostics.FormatReport(diagnosticReport);
-                
-                // 显示到日志
-                foreach (var line in reportText.Split('\n'))
-                {
-                    if (!string.IsNullOrWhiteSpace(line))
-                    {
-                        AddLog(line.TrimEnd('\r'));
-                    }
-                }
-                
-                // 检查是否有异常进程警告
-                if (diagnosticReport.ProcessWarnings.Any())
-                {
-                    var criticalWarnings = diagnosticReport.ProcessWarnings
-                        .Where(w => w.WarningLevel == "Critical")
-                        .ToList();
-                    
-                    if (criticalWarnings.Any())
-                    {
-                        var warning = criticalWarnings.First();
-                        string message = $"检测到异常进程！\n\n" +
-                                       $"进程: {warning.ProcessName} (PID: {warning.ProcessId})\n" +
-                                       $"句柄数: {warning.HandleCount:N0}\n" +
-                                       $"内存: {warning.WorkingSet / 1024 / 1024:N0} MB\n\n" +
-                                       $"{warning.Description}\n\n" +
-                                       $"建议:\n" +
-                                       string.Join("\n", warning.Suggestions.Select(s => $"  • {s}"));
-                        
-                        var result = MessageBox.Show(message + "\n\n是否立即关闭此进程？", 
-                            "⚠️ 异常进程警告", 
-                            MessageBoxButtons.YesNo, 
-                            MessageBoxIcon.Warning);
-                        
-                        if (result == DialogResult.Yes)
-                        {
-                            try
-                            {
-                                AddLog($"正在强制关闭进程: {warning.ProcessName} (PID: {warning.ProcessId})...");
-                                
-                                var process = Process.GetProcessById(warning.ProcessId);
-                                process.Kill(true); // true = 强制结束包括子进程
-                                process.WaitForExit(5000); // 等待最多5秒
-                                
-                                AddLog($"✓ 进程 {warning.ProcessName} 已成功关闭");
-                                await diagnosticLogger?.LogInfoAsync($"用户手动关闭异常进程: {warning.ProcessName} (句柄数: {warning.HandleCount:N0})")!;
-                                
-                                MessageBox.Show($"进程 {warning.ProcessName} 已成功关闭。\n\n建议：\n1. 测试网络是否恢复正常\n2. 如果问题仍存在，请重启计算机", 
-                                    "操作成功", 
-                                    MessageBoxButtons.OK, 
-                                    MessageBoxIcon.Information);
-                            }
-                            catch (Exception ex)
-                            {
-                                AddLog($"✗ 关闭进程失败: {ex.Message}");
-                                await diagnosticLogger?.LogErrorAsync($"关闭异常进程失败: {warning.ProcessName}", ex)!;
-                                
-                                MessageBox.Show($"无法关闭进程: {ex.Message}\n\n请尝试：\n1. 使用任务管理器手动结束\n2. 以管理员身份运行此程序\n3. 重启计算机", 
-                                    "错误", 
-                                    MessageBoxButtons.OK, 
-                                    MessageBoxIcon.Error);
-                            }
-                        }
-                        
-                        if (showTrayNotification)
-                        {
-                            ShowBalloonTipWithSound(5000, "异常进程警告", 
-                                $"{warning.ProcessName} 占用了 {warning.HandleCount:N0} 个句柄，可能导致网络问题", 
-                                ToolTipIcon.Warning);
-                        }
-                    }
-                }
+                using var statusForm = new SystemStatusResultForm(diagnosticReport);
+                statusForm.ShowDialog(this);
                 
                 // 保存详细诊断报告到文件
-                await diagnosticLogger?.LogDiagnosticAsync("手动触发的系统网络诊断", diagnosticReport)!;
+                if (diagnosticLogger != null)
+                {
+                    await diagnosticLogger.LogDiagnosticAsync("手动触发的系统网络诊断", diagnosticReport);
+                }
                 
                 AddLog("===== 诊断完成 =====");
             }
@@ -1365,212 +1738,50 @@ namespace NetworkMonitor
 
         private async Task<bool> CheckNetworkConnectionAsync()
         {
-            try
+            var options = new NetworkCheckOptions
             {
-                // 先尝试ping测试
-                using (var ping = new Ping())
+                LoginUrl = loginUrl,
+                PrimaryDns = primaryDns,
+                SecondaryDns = secondaryDns,
+                PingTimeout = pingTimeout
+            };
+
+            var result = await networkConnectionService.CheckConnectionAsync(options);
+            if (result.GatewayUnreachable)
+            {
+                statusLabel.BeginInvoke(new Action(() =>
                 {
-                    try
-                    {
-                        AddLog("检查网络连接...");
-                        
-                        // 尝试ping百度
-                        if (!string.IsNullOrEmpty(primaryDns))
-                        {
-                            AddLog($"Ping {primaryDns}...");
-                            PingReply reply = await ping.SendPingAsync(primaryDns, pingTimeout);
-                            if (reply.Status == IPStatus.Success)
-                            {
-                                // 检测异常的0ms延迟 - 这通常意味着DNS缓存响应，实际没有真正联网
-                                if (reply.RoundtripTime == 0)
-                                {
-                                    AddLog($"⚠️ Ping {primaryDns} 返回0ms延迟(异常) - IP: {reply.Address}");
-                                    AddLog($"   这通常表示DNS缓存响应，网络可能未真正连接");
-                                    AddLog($"   将视为网络断开，尝试重新认证");
-                                    // 不返回true，继续检查其他方式
-                                }
-                                else
-                                {
-                                    AddLog($"Ping {primaryDns} 成功，延迟: {reply.RoundtripTime}ms (IP: {reply.Address})");
-                                    return true;
-                                }
-                            }
-                            else
-                            {
-                                AddLog($"Ping {primaryDns} 失败: {reply.Status}");
-                            }
-                        }
-                        
-                        // 尝试ping备用DNS
-                        if (!string.IsNullOrEmpty(secondaryDns))
-                        {
-                            AddLog($"Ping {secondaryDns}...");
-                            PingReply reply = await ping.SendPingAsync(secondaryDns, pingTimeout);
-                            if (reply.Status == IPStatus.Success)
-                            {
-                                // 检测异常的0ms延迟
-                                if (reply.RoundtripTime == 0)
-                                {
-                                    AddLog($"⚠️ Ping {secondaryDns} 返回0ms延迟(异常) - IP: {reply.Address}");
-                                    AddLog($"   这通常表示DNS缓存响应，网络可能未真正连接");
-                                    AddLog($"   将视为网络断开，尝试重新认证");
-                                    // 不返回true，继续检查其他方式
-                                }
-                                else
-                                {
-                                    AddLog($"Ping {secondaryDns} 成功，延迟: {reply.RoundtripTime}ms (IP: {reply.Address})");
-                                    return true;
-                                }
-                            }
-                            else
-                            {
-                                AddLog($"Ping {secondaryDns} 失败: {reply.Status}");
-                            }
-                        }
-                        
-                        // 尝试ping公共DNS服务器 (IP地址)
-                        AddLog("尝试Ping公共DNS...");
-                        PingReply publicReply = await ping.SendPingAsync("223.5.5.5", 3000); // 阿里DNS
-                        if (publicReply.Status == IPStatus.Success)
-                        {
-                            if (publicReply.RoundtripTime == 0)
-                            {
-                                AddLog($"⚠️ Ping 223.5.5.5 返回0ms延迟(异常)");
-                                AddLog($"   IP地址也返回0ms，网络状态异常，将视为断开");
-                                // 不返回true
-                            }
-                            else
-                            {
-                                AddLog($"Ping 223.5.5.5 成功，延迟: {publicReply.RoundtripTime}ms");
-                                return true;
-                            }
-                        }
-                        
-                        // 尝试ping百度DNS
-                        publicReply = await ping.SendPingAsync("180.76.76.76", 3000);
-                        if (publicReply.Status == IPStatus.Success)
-                        {
-                            if (publicReply.RoundtripTime == 0)
-                            {
-                                AddLog($"⚠️ Ping 180.76.76.76 返回0ms延迟(异常)");
-                                AddLog($"   IP地址也返回0ms，网络状态异常，将视为断开");
-                                // 不返回true
-                            }
-                            else
-                            {
-                                AddLog($"Ping 180.76.76.76 成功，延迟: {publicReply.RoundtripTime}ms");
-                                return true;
-                            }
-                        }
-                    }
-                    catch (PingException ex)
-                    {
-                        AddLog($"Ping测试异常: {ex.Message}");
-                    }
-                }
-                
-                // Ping失败，通过HTTP请求检查是否需要认证
-                AddLog("Ping测试失败，检查是否需要认证...");
-                
-                try
-                {
-                    AddLog($"检查认证网关 {loginUrl}...");
-                    
-                    using var request = new HttpRequestMessage(HttpMethod.Get, loginUrl);
-                    request.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
-                    
-                    using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
-                    using var gatewayResponse = await sharedHttpClient.SendAsync(request, cts.Token);
-                    var gatewayContent = await gatewayResponse.Content.ReadAsStringAsync();
-                    
-                    // 检查是否已认证
-                    bool isAuthenticated = gatewayContent.Contains("认证成功") || 
-                                         gatewayContent.Contains("您已经成功登录") ||
-                                         gatewayContent.Contains("disconnconfig") ||
-                                         gatewayContent.Contains("连接网络") ||
-                                         gatewayContent.Contains("您可以关闭该页面");
-                    
-                    if (isAuthenticated)
-                    {
-                        AddLog("检测到已认证页面，但网络不通");
-                        return false;
-                    }
-                    else if (gatewayContent.Contains("login") || gatewayContent.Contains("认证") || 
-                            gatewayContent.Contains("用户名") || gatewayContent.Contains("密码"))
-                    {
-                        AddLog("检测到认证页面，需要登录");
-                        return false;
-                    }
-                    else
-                    {
-                        AddLog("无法确定认证状态");
-                        return false;
-                    }
-                }
-                catch (HttpRequestException ex)
-                {
-                    AddLog($"无法连接到认证网关: {ex.Message}");
-                    AddLog("可能网线未插或网络故障");
                     statusLabel.Text = "状态: 网络故障";
-                    statusLabel.ForeColor = System.Drawing.Color.Red;
-                    
-                    // 记录详细的连接错误诊断
-                    _ = diagnosticLogger?.LogNetworkErrorAsync($"无法连接到认证网关 {loginUrl}", ex);
-                    
-                    return false;
-                }
-                catch (TaskCanceledException)
-                {
-                    AddLog("连接认证网关超时");
-                    return false;
-                }
+                    statusLabel.ForeColor = UiTheme.Error;
+                }));
             }
-            catch (Exception ex)
-            {
-                AddLog($"网络检测异常: {ex.Message}");
-                
-                // 记录详细的网络错误诊断
-                _ = diagnosticLogger?.LogNetworkErrorAsync("网络连接检测失败", ex);
-                
-                // 检查是否有异常进程影响网络
-                _ = Task.Run(async () =>
-                {
-                    try
-                    {
-                        var warnings = NetworkDiagnostics.DetectAbnormalProcesses();
-                        if (warnings.Any(w => w.WarningLevel == "Critical"))
-                        {
-                            var critical = warnings.First(w => w.WarningLevel == "Critical");
-                            await diagnosticLogger?.LogAsync(LogLevel.Warning, 
-                                $"检测到异常进程 {critical.ProcessName} (句柄数: {critical.HandleCount:N0})，可能影响网络连接")!;
-                        }
-                    }
-                    catch { }
-                });
-                
-                return false;
-            }
+
+            return result.IsConnected;
         }
 
-        private async Task AutoLoginAsync()
+        private Task AutoLoginAsync()
         {
-            // 如果已有登录任务在运行，先取消它
-            if (loginCts != null && !loginCts.Token.IsCancellationRequested)
+            // 避免在断网期间频繁重启登录任务，造成连接和句柄风暴
+            if (loginTask != null && !loginTask.IsCompleted)
             {
-                AddLog("已有登录任务在运行，先取消之前的任务");
-                loginCts.Cancel();
-                try 
-                { 
-                    if (loginTask != null)
-                        await loginTask; 
-                } 
-                catch { }
-                loginCts.Dispose();
+                AddLog("登录任务正在运行中，跳过本次重复触发");
+                return Task.CompletedTask;
+            }
+
+            int cooldownSeconds = Math.Max(20, loginRetryDelay);
+            if (lastAutoLoginStartTime != DateTime.MinValue &&
+                DateTime.Now - lastAutoLoginStartTime < TimeSpan.FromSeconds(cooldownSeconds))
+            {
+                var remain = cooldownSeconds - (int)(DateTime.Now - lastAutoLoginStartTime).TotalSeconds;
+                AddLog($"自动登录冷却中，{Math.Max(remain, 1)}秒后再尝试");
+                return Task.CompletedTask;
             }
             
             // 创建新的取消令牌
+            loginCts?.Dispose();
             loginCts = new CancellationTokenSource();
             var token = loginCts.Token;
+            lastAutoLoginStartTime = DateTime.Now;
             
             // 在新任务中执行登录
             loginTask = Task.Run(async () => 
@@ -1578,124 +1789,48 @@ namespace NetworkMonitor
                 // 记录登录尝试时间
                 lastLoginAttemptTime = DateTime.Now;
                 UpdateTimeLabels();
-                
-                int attemptCount = 0;
-                int maxAttempts = loginRetryCount + 1; // 总尝试次数 = 重试次数 + 1
-                bool success = false;
-                string lastErrorMessage = "";
-                
-                AddLog($"开始自动登录校园网（最多尝试{maxAttempts}次）...");
-                
-                while (attemptCount < maxAttempts && !success && !token.IsCancellationRequested && isMonitoring)
+
+                var loginOptions = new AutoLoginOptions
                 {
-                    attemptCount++;
-                    
-                    if (attemptCount > 1)
-                    {
-                        AddLog($"\n第{attemptCount}次尝试登录...");
-                    }
-                    
-                    try
-                    {
-                        // 检查是否应该继续
-                        if (token.IsCancellationRequested || !isMonitoring)
-                        {
-                            AddLog("登录任务已取消");
-                            return;
-                        }
-                        
-                        // 使用封装的认证类
-                        var authenticator = new CampusNetworkAuthenticator(
-                            loginUrl, 
-                            username,
-                            password
-                        );
-                        
-                        // 订阅日志事件
-                        authenticator.LogMessage += AddLog;
-                        
-                        // 订阅网络错误事件
-                        authenticator.OnNetworkError += (ex) =>
-                        {
-                            _ = diagnosticLogger?.LogNetworkErrorAsync("自动登录时网络错误", ex);
-                        };
-                        
-                        // 执行认证
-                        var result = await authenticator.AuthenticateAsync();
-                        
-                        // 检查结果
-                        if (result.Success)
-                        {
-                            success = true;
-                            AddLog($"✓ 自动登录成功！（第{attemptCount}次尝试）");
-                            
-                            if (showTrayNotification)
-                            {
-                                ShowBalloonTipWithSound(3000, "登录成功", 
-                                    $"校园网自动登录成功！\n尝试{attemptCount}次", 
-                                    ToolTipIcon.Info);
-                            }
-                        }
-                        else
-                        {
-                            lastErrorMessage = result.Message;
-                            AddLog($"✗ 第{attemptCount}次登录失败: {result.Message}");
-                            
-                            // 如果还有重试机会，等待一段时间
-                            if (attemptCount < maxAttempts && !token.IsCancellationRequested && isMonitoring)
-                            {
-                                AddLog($"等待{loginRetryDelay}秒后重试...");
-                                await Task.Delay(loginRetryDelay * 1000, token);
-                            }
-                        }
-                    }
-                    catch (OperationCanceledException)
-                    {
-                        AddLog("登录任务被取消");
-                        return;
-                    }
-                    catch (Exception ex)
-                    {
-                        lastErrorMessage = ex.Message;
-                        AddLog($"✗ 第{attemptCount}次登录异常: {ex.Message}");
-                        
-                        // 如果还有重试机会，等待一段时间
-                        if (attemptCount < maxAttempts && !token.IsCancellationRequested && isMonitoring)
-                        {
-                            AddLog($"等待{loginRetryDelay}秒后重试...");
-                            try
-                            {
-                                await Task.Delay(loginRetryDelay * 1000, token);
-                            }
-                            catch (OperationCanceledException)
-                            {
-                                AddLog("登录任务被取消");
-                                return;
-                            }
-                        }
-                    }
-                }
-                
-                // 检查是否因为取消而退出
-                if (token.IsCancellationRequested || !isMonitoring)
+                    LoginUrl = loginUrl,
+                    Username = username,
+                    Password = password,
+                    RetryCount = loginRetryCount,
+                    RetryDelaySeconds = loginRetryDelay
+                };
+
+                var result = await campusAutoLoginService.AuthenticateWithRetryAsync(
+                    loginOptions,
+                    token,
+                    () => isMonitoring);
+
+                if (result.Canceled)
                 {
-                    AddLog("登录任务已停止");
                     return;
                 }
-                
-                // 所有尝试完成后的总结
-                if (!success)
+
+                if (result.Success)
                 {
-                    AddLog($"\n✗ 自动登录最终失败（已尝试{attemptCount}次）");
-                    
                     if (showTrayNotification)
                     {
-                        ShowBalloonTipWithSound(5000, "登录失败", 
-                            $"校园网自动登录失败\n尝试{attemptCount}次后仍然失败\n{lastErrorMessage}", 
+                        ShowBalloonTipWithSound(3000, "登录成功",
+                            $"校园网自动登录成功！\n尝试{result.AttemptCount}次",
+                            ToolTipIcon.Info);
+                    }
+                }
+                else
+                {
+                    AddLog($"\n✗ 自动登录最终失败（已尝试{result.AttemptCount}次）");
+                    if (showTrayNotification)
+                    {
+                        ShowBalloonTipWithSound(5000, "登录失败",
+                            $"校园网自动登录失败\n尝试{result.AttemptCount}次后仍然失败\n{result.LastErrorMessage}",
                             ToolTipIcon.Warning);
                     }
                 }
             }, token);
+
+            return Task.CompletedTask;
         }
 
         private void UpdateTimeLabels()
@@ -1732,6 +1867,7 @@ namespace NetworkMonitor
             if (disposing)
             {
                 networkCheckTimer?.Dispose();
+                logUpdateTimer?.Dispose();
                 notifyIcon?.Dispose();
                 diagnosticLogger?.Dispose();
             }
