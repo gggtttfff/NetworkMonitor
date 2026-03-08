@@ -36,13 +36,13 @@ jobs:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
       - name: Restore
-        run: dotnet restore .\NetworkMonitor.csproj
+        run: dotnet restore .\NetworkMonitor.csproj --runtime $env:RUNTIME_ID
 
       - name: Build
-        run: dotnet build .\NetworkMonitor.csproj --configuration $env:BUILD_CONFIGURATION --no-restore
+        run: dotnet build .\NetworkMonitor.csproj --configuration $env:BUILD_CONFIGURATION --runtime $env:RUNTIME_ID --no-restore
 
       - name: Publish
-        run: dotnet publish .\NetworkMonitor.csproj --configuration $env:BUILD_CONFIGURATION --runtime $env:RUNTIME_ID --self-contained true -p:PublishSingleFile=true --no-build -o $env:PUBLISH_DIR
+        run: dotnet publish .\NetworkMonitor.csproj --configuration $env:BUILD_CONFIGURATION --runtime $env:RUNTIME_ID --self-contained true -p:PublishSingleFile=true --no-restore -o $env:PUBLISH_DIR
 
       - name: Upload Publish Artifact
         uses: actions/upload-artifact@v4
