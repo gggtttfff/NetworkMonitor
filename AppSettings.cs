@@ -21,12 +21,14 @@ namespace NetworkMonitor
         public bool LastMonitoringEnabled { get; set; } = false; // 程序关闭时是否处于监控中
         public bool SaveTestResult { get; set; } = false;
         public string TestResultPath { get; set; } = "test_results";
+        public bool SaveLogs { get; set; } = true;
+        public int LogRetentionDays { get; set; } = 30;
         public bool EnableTimeRange { get; set; } = false;
         public string StartTime { get; set; } = "06:00:00";
         public string EndTime { get; set; } = "23:00:00";
         public int CheckInterval { get; set; } = 5; // 检查间隔（秒）
-        public string Username { get; set; } = "23325024026"; // 校园网用户名
-        public string Password { get; set; } = "17881936070"; // 校园网密码
+        public string Username { get; set; } = ""; // 校园网用户名
+        public string Password { get; set; } = ""; // 校园网密码
         
         // 自动监测时间段设置
         public bool EnableMonitorTimeRange { get; set; } = false; // 启用监测时间段

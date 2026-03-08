@@ -21,11 +21,11 @@ namespace NetworkMonitor
         private System.Windows.Forms.Timer networkCheckTimer = null!;
         private System.Windows.Forms.Timer logUpdateTimer = null!;
         private Label statusLabel = null!;
-        private Button startButton = null!;
-        private Button stopButton = null!;
-        private Button settingsButton = null!;
-        private Button testButton = null!;
-        private Button loginTestButton = null!;
+        private RoundedButton startButton = null!;
+        private RoundedButton stopButton = null!;
+        private RoundedButton settingsButton = null!;
+        private RoundedButton testButton = null!;
+        private RoundedButton loginTestButton = null!;
         private NumericUpDown intervalInput = null!;
         private NotifyIcon notifyIcon = null!;
         private TextBox logTextBox = null!;
@@ -62,11 +62,13 @@ namespace NetworkMonitor
         private bool lastMonitoringEnabled = false; // 上次关闭程序时是否在监控
         private bool saveTestResult = false;
         private string testResultPath = "test_results";
+        private bool saveLogs = true;
+        private int logRetentionDays = 30;
         private bool enableTimeRange = false;
         private TimeSpan startTime = new TimeSpan(6, 0, 0);   // 06:00
         private TimeSpan endTime = new TimeSpan(23, 0, 0);    // 23:00
-        private string username = "23325024026";  // 校园网用户名
-        private string password = "17881936070";  // 校园网密码
+        private string username = "";  // 校园网用户名
+        private string password = "";  // 校园网密码
         private bool enableMonitorTimeRange = false;
         private TimeSpan monitorStartTime = new TimeSpan(0, 0, 0);
         private TimeSpan monitorEndTime = new TimeSpan(23, 59, 59);
@@ -91,6 +93,12 @@ namespace NetworkMonitor
 
         [DllImport("winmm.dll")]
         private static extern int waveOutGetVolume(IntPtr hwo, out uint dwVolume);
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+
+        private const int DWMWA_CAPTION_COLOR = 35;
+        private const int DWMWA_TEXT_COLOR = 36;
 
         private uint originalVolume = 0;
 
@@ -128,6 +136,8 @@ namespace NetworkMonitor
                 lastMonitoringEnabled = settings.LastMonitoringEnabled;
                 saveTestResult = settings.SaveTestResult;
                 testResultPath = settings.TestResultPath;
+                saveLogs = settings.SaveLogs;
+                logRetentionDays = Math.Max(1, settings.LogRetentionDays);
                 enableTimeRange = settings.EnableTimeRange;
                 
                 // 解析时间
@@ -191,6 +201,8 @@ namespace NetworkMonitor
                     LastMonitoringEnabled = isMonitoring,
                     SaveTestResult = saveTestResult,
                     TestResultPath = testResultPath,
+                    SaveLogs = saveLogs,
+                    LogRetentionDays = logRetentionDays,
                     EnableTimeRange = enableTimeRange,
                     StartTime = startTime.ToString(@"hh\:mm\:ss"),
                     EndTime = endTime.ToString(@"hh\:mm\:ss"),
@@ -251,8 +263,16 @@ namespace NetworkMonitor
         {
             try
             {
+                diagnosticLogger?.Dispose();
+                diagnosticLogger = null;
+
+                if (!saveLogs)
+                {
+                    return;
+                }
+
                 // 创建诊断日志记录器
-                diagnosticLogger = new DiagnosticLogger();
+                diagnosticLogger = new DiagnosticLogger(retentionDays: logRetentionDays);
                 
                 // 订阅日志事件以更新UI（使用缓冲区避免卡顿）
                 diagnosticLogger.OnLogMessage += (message) =>
@@ -309,6 +329,39 @@ namespace NetworkMonitor
             PlayNotificationSound();
         }
 
+        private void OpenCampusLoginPage()
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = loginUrl,
+                    UseShellExecute = true
+                });
+                AddLog($"已打开校园网登录页: {loginUrl}");
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"打开校园网登录页失败: {ex.Message}", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                AddLog($"打开校园网登录页失败: {ex.Message}");
+            }
+        }
+
+        private void TryApplyBlankCaption()
+        {
+            try
+            {
+                int captionColor = ColorTranslator.ToWin32(Color.FromArgb(255, 255, 255));
+                int textColor = ColorTranslator.ToWin32(Color.FromArgb(255, 255, 255));
+                _ = DwmSetWindowAttribute(this.Handle, DWMWA_CAPTION_COLOR, ref captionColor, sizeof(int));
+                _ = DwmSetWindowAttribute(this.Handle, DWMWA_TEXT_COLOR, ref textColor, sizeof(int));
+            }
+            catch
+            {
+                // 如果系统不支持 DWM 标题栏属性，保留默认行为
+            }
+        }
+
         private void InitializeComponents()
         {
             this.Text = "网络监控工具";
@@ -316,7 +369,8 @@ namespace NetworkMonitor
             this.MinimumSize = new System.Drawing.Size(980, 680);
             this.StartPosition = FormStartPosition.CenterScreen;
             this.Icon = appIcon;
-            this.BackColor = UiTheme.BgDarkest;
+            this.BackColor = Color.FromArgb(255, 255, 255);
+            this.HandleCreated += (_, _) => TryApplyBlankCaption();
 
             // 初始化系统托盘图标
             notifyIcon = new NotifyIcon
@@ -343,177 +397,178 @@ namespace NetworkMonitor
             var rootPanel = new Panel
             {
                 Dock = DockStyle.Fill,
-                BackColor = UiTheme.BgDarkest
+                BackColor = Color.FromArgb(255, 255, 255)
             };
 
             var sideBar = new Panel
             {
                 Dock = DockStyle.Left,
                 Width = 240,
-                BackColor = UiTheme.BgDark
+                BackColor = Color.FromArgb(250, 250, 250)
             };
 
-            var sideHeader = new Label
+            var sideHeader = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 72,
+                Padding = new Padding(16, 16, 16, 16),
+                BackColor = Color.FromArgb(250, 250, 250)
+            };
+
+            var sideHeaderIcon = new PictureBox
+            {
+                Location = new Point(8, 0),
+                Size = new Size(32, 32),
+                SizeMode = PictureBoxSizeMode.Zoom,
+                Image = appIcon.ToBitmap()
+            };
+
+            var sideHeaderText = new Label
             {
                 Text = "网络监控工具",
-                Dock = DockStyle.Top,
-                Height = 70,
-                Padding = new Padding(16, 24, 0, 0),
-                Font = new System.Drawing.Font("微软雅黑", 15, FontStyle.Bold),
-                ForeColor = UiTheme.TextPrimary
+                Location = new Point(50, 4),
+                Size = new Size(160, 24),
+                Font = new System.Drawing.Font("微软雅黑", 12, FontStyle.Bold),
+                ForeColor = Color.FromArgb(31, 41, 55),
+                BackColor = Color.Transparent
             };
+            sideHeader.Controls.Add(sideHeaderIcon);
+            sideHeader.Controls.Add(sideHeaderText);
 
-            var navLabel = new Label
-            {
-                Text = "功能分类",
-                Dock = DockStyle.Top,
-                Height = 30,
-                Padding = new Padding(16, 8, 0, 0),
-                Font = new System.Drawing.Font("微软雅黑", 9),
-                ForeColor = UiTheme.TextSecondary
-            };
+            Label topTitle = new Label();
 
-            Button navServerButton = new Button
+            RoundedButton navServerButton = new RoundedButton
             {
                 Text = "监控中心",
                 Dock = DockStyle.Top,
                 Height = 42,
-                FlatStyle = FlatStyle.Flat,
                 BackColor = UiTheme.Panel,
-                ForeColor = UiTheme.TextPrimary,
+                ForeColor = Color.FromArgb(31, 41, 55),
                 TextAlign = ContentAlignment.MiddleLeft,
-                Padding = new Padding(16, 0, 0, 0)
+                Padding = new Padding(16, 0, 0, 0),
+                BorderRadius = 0
             };
-            navServerButton.FlatAppearance.BorderColor = UiTheme.Border;
 
-            Button navIntegrationButton = new Button
+            RoundedButton navIntegrationButton = new RoundedButton
             {
                 Text = "认证登录",
                 Dock = DockStyle.Top,
                 Height = 42,
-                FlatStyle = FlatStyle.Flat,
                 BackColor = UiTheme.BgDark,
                 ForeColor = UiTheme.TextPrimary,
                 TextAlign = ContentAlignment.MiddleLeft,
-                Padding = new Padding(16, 0, 0, 0)
+                Padding = new Padding(16, 0, 0, 0),
+                BorderRadius = 0
             };
-            navIntegrationButton.FlatAppearance.BorderColor = UiTheme.Border;
 
-            Button navLogButton = new Button
-            {
-                Text = "网络诊断",
-                Dock = DockStyle.Top,
-                Height = 42,
-                FlatStyle = FlatStyle.Flat,
-                BackColor = UiTheme.BgDark,
-                ForeColor = UiTheme.TextPrimary,
-                TextAlign = ContentAlignment.MiddleLeft,
-                Padding = new Padding(16, 0, 0, 0)
-            };
-            navLogButton.FlatAppearance.BorderColor = UiTheme.Border;
 
-            settingsButton = new Button
+            settingsButton = new RoundedButton
             {
                 Text = "设置",
                 Dock = DockStyle.Bottom,
                 Height = 46,
-                FlatStyle = FlatStyle.Flat,
                 BackColor = UiTheme.BgDark,
                 ForeColor = UiTheme.TextPrimary,
                 TextAlign = ContentAlignment.MiddleLeft,
-                Padding = new Padding(16, 0, 0, 0)
+                Padding = new Padding(16, 0, 0, 0),
+                BorderRadius = 0
             };
-            settingsButton.FlatAppearance.BorderColor = UiTheme.Border;
             settingsButton.Click += SettingsButton_Click;
 
+            var navButtons = new[] { navServerButton, navIntegrationButton, settingsButton };
+            RoundedButton activeNavButton = navServerButton;
+            Color navNormalColor = Color.FromArgb(250, 250, 250);
+            Color navActiveColor = Color.FromArgb(245, 245, 245);
+
+            void SetActiveNav(RoundedButton selectedButton, string title)
+            {
+                foreach (var btn in navButtons)
+                {
+                    btn.BackColor = btn == selectedButton ? navActiveColor : navNormalColor;
+                }
+                activeNavButton = selectedButton;
+                topTitle.Text = title;
+            }
+
+            foreach (var btn in navButtons)
+            {
+                btn.MouseEnter += (_, _) =>
+                {
+                    if (btn != activeNavButton)
+                    {
+                        btn.BackColor = navActiveColor;
+                    }
+                };
+
+                btn.MouseLeave += (_, _) =>
+                {
+                    if (btn != activeNavButton)
+                    {
+                        btn.BackColor = navNormalColor;
+                    }
+                };
+            }
+
+            navServerButton.Click += (_, _) => SetActiveNav(navServerButton, "监控中心");
+            navIntegrationButton.Click += (_, _) =>
+            {
+                SetActiveNav(navIntegrationButton, "认证登录");
+                OpenCampusLoginPage();
+            };
+            settingsButton.Click += (_, _) => SetActiveNav(settingsButton, "设置");
+
             sideBar.Controls.Add(settingsButton);
-            sideBar.Controls.Add(navLogButton);
             sideBar.Controls.Add(navIntegrationButton);
             sideBar.Controls.Add(navServerButton);
-            sideBar.Controls.Add(navLabel);
             sideBar.Controls.Add(sideHeader);
 
             var rightPanel = new Panel
             {
                 Dock = DockStyle.Fill,
-                BackColor = UiTheme.BgDarkest
+                BackColor = Color.FromArgb(255, 255, 255)
             };
 
             var topBar = new Panel
             {
                 Dock = DockStyle.Top,
                 Height = 62,
-                BackColor = UiTheme.BgDark
+                BackColor = Color.FromArgb(255, 255, 255)
             };
 
-            var topTitle = new Label
+            topTitle = new Label
             {
                 Text = "监控中心",
                 Location = new Point(16, 18),
                 Size = new Size(180, 28),
                 Font = new Font("微软雅黑", 12, FontStyle.Regular),
-                ForeColor = UiTheme.TextPrimary
+                ForeColor = Color.FromArgb(31, 41, 55)
             };
-
-            var searchBox = new TextBox
-            {
-                Location = new Point(230, 18),
-                Size = new Size(220, 28),
-                Text = "搜索",
-                BorderStyle = BorderStyle.FixedSingle,
-                BackColor = UiTheme.Panel,
-                ForeColor = UiTheme.TextSecondary
-            };
-
-            var listModeBtn = new Button
-            {
-                Text = "≡",
-                Location = new Point(470, 16),
-                Size = new Size(32, 32),
-                FlatStyle = FlatStyle.Flat,
-                BackColor = UiTheme.Panel,
-                ForeColor = UiTheme.TextPrimary
-            };
-            listModeBtn.FlatAppearance.BorderColor = UiTheme.Border;
-
-            var gridModeBtn = new Button
-            {
-                Text = "▦",
-                Location = new Point(508, 16),
-                Size = new Size(32, 32),
-                FlatStyle = FlatStyle.Flat,
-                BackColor = UiTheme.BgDark,
-                ForeColor = UiTheme.TextPrimary
-            };
-            gridModeBtn.FlatAppearance.BorderColor = UiTheme.Border;
 
             topBar.Controls.Add(topTitle);
-            topBar.Controls.Add(searchBox);
-            topBar.Controls.Add(listModeBtn);
-            topBar.Controls.Add(gridModeBtn);
+            SetActiveNav(navServerButton, "监控中心");
 
             var contentHost = new Panel
             {
                 Dock = DockStyle.Fill,
                 Padding = new Padding(18, 14, 18, 18),
-                BackColor = UiTheme.BgDarkest
+                BackColor = Color.FromArgb(255, 255, 255)
             };
 
             var cardPanel = new Panel
             {
                 Dock = DockStyle.Fill,
-                BackColor = UiTheme.Panel,
-                BorderStyle = BorderStyle.FixedSingle,
+                BackColor = Color.FromArgb(255, 255, 255),
                 Padding = new Padding(16, 14, 16, 16)
             };
+            // 添加阴影效果
+            cardPanel.Paint += CardPanel_Paint;
 
             var cardTitle = new Label
             {
-                Text = "网络检测程序",
+                Text = "",
                 Dock = DockStyle.Top,
-                Height = 34,
-                Font = new Font("微软雅黑", 12, FontStyle.Bold),
-                ForeColor = UiTheme.TextPrimary
+                Height = 8,
+                BackColor = Color.FromArgb(255, 255, 255)
             };
 
             statusLabel = new Label
@@ -522,7 +577,8 @@ namespace NetworkMonitor
                 Dock = DockStyle.Top,
                 Height = 28,
                 Font = new Font("微软雅黑", 10),
-                ForeColor = UiTheme.TextSecondary
+                ForeColor = Color.FromArgb(75, 85, 99),
+                BackColor = Color.FromArgb(255, 255, 255)
             };
 
             lastDisconnectLabel = new Label
@@ -531,7 +587,8 @@ namespace NetworkMonitor
                 Dock = DockStyle.Top,
                 Height = 24,
                 Font = new Font("微软雅黑", 9),
-                ForeColor = UiTheme.TextSecondary
+                ForeColor = Color.FromArgb(107, 114, 128),
+                BackColor = Color.FromArgb(255, 255, 255)
             };
 
             lastLoginAttemptLabel = new Label
@@ -540,7 +597,8 @@ namespace NetworkMonitor
                 Dock = DockStyle.Top,
                 Height = 24,
                 Font = new Font("微软雅黑", 9),
-                ForeColor = UiTheme.TextSecondary
+                ForeColor = Color.FromArgb(107, 114, 128),
+                BackColor = Color.FromArgb(255, 255, 255)
             };
 
             var actionPanel = new FlowLayoutPanel
@@ -551,7 +609,7 @@ namespace NetworkMonitor
                 WrapContents = true,
                 FlowDirection = FlowDirection.LeftToRight,
                 Padding = new Padding(0, 6, 0, 0),
-                BackColor = UiTheme.Panel
+                BackColor = Color.FromArgb(255, 255, 255)
             };
 
             Label intervalLabel = new Label
@@ -560,7 +618,8 @@ namespace NetworkMonitor
                 AutoSize = false,
                 Size = new Size(100, 34),
                 TextAlign = ContentAlignment.MiddleLeft,
-                ForeColor = UiTheme.TextSecondary
+                ForeColor = Color.FromArgb(75, 85, 99),
+                BackColor = Color.FromArgb(255, 255, 255)
             };
 
             intervalInput = new NumericUpDown
@@ -569,8 +628,8 @@ namespace NetworkMonitor
                 Minimum = 1,
                 Maximum = 300,
                 Value = 5,
-                BackColor = UiTheme.BgDark,
-                ForeColor = UiTheme.TextPrimary
+                BackColor = Color.FromArgb(245, 245, 245),
+                ForeColor = Color.FromArgb(31, 41, 55)
             };
 
             // 应用已保存的检查间隔
@@ -584,71 +643,65 @@ namespace NetworkMonitor
             }
             catch { /* 忽略错误，使用默认值 */ }
 
-            startButton = new Button
+            startButton = new RoundedButton
             {
                 Text = "启动监控",
                 Size = new Size(110, 34),
                 BackColor = UiTheme.PrimaryGreen,
                 ForeColor = UiTheme.TextPrimary,
-                FlatStyle = FlatStyle.Flat
+                BorderRadius = 6
             };
-            startButton.FlatAppearance.BorderColor = UiTheme.DeepGreen;
             startButton.Click += StartButton_Click;
 
-            stopButton = new Button
+            stopButton = new RoundedButton
             {
                 Text = "停止监控",
                 Size = new Size(110, 34),
                 Enabled = false,
                 BackColor = UiTheme.Error,
                 ForeColor = UiTheme.TextPrimary,
-                FlatStyle = FlatStyle.Flat
+                BorderRadius = 6
             };
-            stopButton.FlatAppearance.BorderColor = UiTheme.Border;
             stopButton.Click += StopButton_Click;
 
-            testButton = new Button
+            testButton = new RoundedButton
             {
                 Text = "测试访问",
                 Size = new Size(110, 34),
                 BackColor = UiTheme.Info,
                 ForeColor = UiTheme.TextPrimary,
-                FlatStyle = FlatStyle.Flat
+                BorderRadius = 6
             };
-            testButton.FlatAppearance.BorderColor = UiTheme.Border;
             testButton.Click += TestButton_Click;
 
-            loginTestButton = new Button
+            loginTestButton = new RoundedButton
             {
                 Text = "测试登录",
                 Size = new Size(110, 34),
                 BackColor = UiTheme.DeepGreen,
                 ForeColor = UiTheme.TextPrimary,
-                FlatStyle = FlatStyle.Flat
+                BorderRadius = 6
             };
-            loginTestButton.FlatAppearance.BorderColor = UiTheme.Border;
             loginTestButton.Click += LoginTestButton_Click;
 
-            Button systemStatusButton = new Button
+            RoundedButton systemStatusButton = new RoundedButton
             {
                 Text = "系统网络状态",
                 Size = new Size(130, 34),
                 BackColor = UiTheme.BgDark,
                 ForeColor = UiTheme.TextPrimary,
-                FlatStyle = FlatStyle.Flat
+                BorderRadius = 6
             };
-            systemStatusButton.FlatAppearance.BorderColor = UiTheme.Border;
             systemStatusButton.Click += SystemStatusButton_Click;
 
-            Button abnormalProcessButton = new Button
+            RoundedButton abnormalProcessButton = new RoundedButton
             {
                 Text = "检测异常进程",
                 Size = new Size(130, 34),
                 BackColor = UiTheme.Warning,
                 ForeColor = UiTheme.TextPrimary,
-                FlatStyle = FlatStyle.Flat
+                BorderRadius = 6
             };
-            abnormalProcessButton.FlatAppearance.BorderColor = UiTheme.Border;
             abnormalProcessButton.Click += AbnormalProcessButton_Click;
 
             actionPanel.Controls.Add(intervalLabel);
@@ -666,7 +719,8 @@ namespace NetworkMonitor
                 Dock = DockStyle.Top,
                 Height = 30,
                 Font = new Font("微软雅黑", 10, FontStyle.Bold),
-                ForeColor = UiTheme.TextPrimary
+                ForeColor = Color.FromArgb(31, 41, 55),
+                BackColor = Color.FromArgb(255, 255, 255)
             };
 
             logTextBox = new TextBox
@@ -675,9 +729,9 @@ namespace NetworkMonitor
                 Multiline = true,
                 ScrollBars = ScrollBars.Vertical,
                 ReadOnly = true,
-                BackColor = UiTheme.BgDark,
-                ForeColor = UiTheme.TextPrimary,
-                BorderStyle = BorderStyle.FixedSingle,
+                BackColor = Color.FromArgb(245, 245, 245),
+                ForeColor = Color.FromArgb(31, 41, 55),
+                BorderStyle = BorderStyle.None,
                 Font = new Font("Consolas", 9)
             };
 
@@ -715,8 +769,45 @@ namespace NetworkMonitor
             AddLog("程序启动完成");
         }
 
+        private void CardPanel_Paint(object? sender, PaintEventArgs e)
+        {
+            // 绘制阴影效果
+            if (sender is not Panel panel) return;
+
+            var graphics = e.Graphics;
+            var bounds = panel.ClientRectangle;
+
+            // 阴影参数
+            int shadowSize = 4;
+            int shadowOpacity = 25;
+
+            // 绘制底部阴影
+            using (var shadowBrush = new SolidBrush(Color.FromArgb(shadowOpacity, 0, 0, 0)))
+            {
+                // 底部阴影
+                graphics.FillRectangle(shadowBrush,
+                    shadowSize, bounds.Height - shadowSize,
+                    bounds.Width - shadowSize * 2, shadowSize);
+
+                // 右侧阴影
+                graphics.FillRectangle(shadowBrush,
+                    bounds.Width - shadowSize, shadowSize,
+                    shadowSize, bounds.Height - shadowSize * 2);
+
+                // 右下角圆角阴影
+                graphics.FillRectangle(shadowBrush,
+                    bounds.Width - shadowSize, bounds.Height - shadowSize,
+                    shadowSize, shadowSize);
+            }
+        }
+
         private async void MainForm_Load(object? sender, EventArgs e)
         {
+            if (!EnsureInitialRequiredSettings())
+            {
+                return;
+            }
+
             bool shouldAutoStartMonitoring = autoStartMonitoring || lastMonitoringEnabled;
             if (shouldAutoStartMonitoring)
             {
@@ -1029,10 +1120,9 @@ namespace NetworkMonitor
             AddLog("监控已停止");
         }
 
-        private void SettingsButton_Click(object? sender, EventArgs e)
+        private AppSettings BuildCurrentSettings()
         {
-            // 使用新的构造函数传递AppSettings对象
-            var currentSettings = new AppSettings
+            return new AppSettings
             {
                 LoginUrl = loginUrl,
                 PrimaryDns = primaryDns,
@@ -1048,6 +1138,8 @@ namespace NetworkMonitor
                 LastMonitoringEnabled = isMonitoring,
                 SaveTestResult = saveTestResult,
                 TestResultPath = testResultPath,
+                SaveLogs = saveLogs,
+                LogRetentionDays = logRetentionDays,
                 EnableTimeRange = enableTimeRange,
                 StartTime = startTime.ToString(@"hh\:mm\:ss"),
                 EndTime = endTime.ToString(@"hh\:mm\:ss"),
@@ -1063,49 +1155,85 @@ namespace NetworkMonitor
                 LoginRetryCount = loginRetryCount,
                 LoginRetryDelay = loginRetryDelay
             };
-            
-            var settingsForm = new SettingsForm(currentSettings);
+        }
+
+        private void ApplySettingsFromForm(SettingsForm settingsForm)
+        {
+            loginUrl = settingsForm.LoginUrl;
+            primaryDns = settingsForm.PrimaryDns;
+            secondaryDns = settingsForm.SecondaryDns;
+            pingTimeout = settingsForm.Timeout;
+            username = settingsForm.Username;
+            password = settingsForm.Password;
+            showNotification = settingsForm.ShowNotification;
+            showTrayNotification = settingsForm.ShowTrayNotification;
+            showRecoveryNotification = settingsForm.ShowRecoveryNotification;
+            autoStart = settingsForm.AutoStart;
+            autoStartMonitoring = settingsForm.AutoStartMonitoring;
+            saveTestResult = settingsForm.SaveTestResult;
+            testResultPath = settingsForm.TestResultPath;
+            saveLogs = settingsForm.SaveLogs;
+            logRetentionDays = settingsForm.LogRetentionDays;
+            enableTimeRange = settingsForm.EnableTimeRange;
+            startTime = settingsForm.StartTime;
+            endTime = settingsForm.EndTime;
+            enableMonitorTimeRange = settingsForm.EnableMonitorTimeRange;
+            monitorStartTime = settingsForm.MonitorStartTime;
+            monitorEndTime = settingsForm.MonitorEndTime;
+            enableAllDayDetection = settingsForm.EnableAllDayDetection;
+            allDayDetectionInterval = settingsForm.AllDayDetectionInterval;
+            allDayAutoLogin = settingsForm.AllDayAutoLogin;
+            loginStrategy = settingsForm.LoginStrategy;
+            loginRetryCount = settingsForm.LoginRetryCount;
+            loginRetryDelay = settingsForm.LoginRetryDelay;
+        }
+
+        private bool EnsureInitialRequiredSettings()
+        {
+            bool firstRun = !File.Exists(SettingsManager.GetSettingsFilePath());
+            bool missingRequired = string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password);
+            if (!firstRun && !missingRequired)
+            {
+                return true;
+            }
+
+            MessageBox.Show("首次使用请先完成必要配置（账号、密码等）。", "首次配置", MessageBoxButtons.OK, MessageBoxIcon.Information);
+
+            while (true)
+            {
+                using var settingsForm = new SettingsForm(BuildCurrentSettings());
+                var result = settingsForm.ShowDialog(this);
+                if (result == DialogResult.OK)
+                {
+                    ApplySettingsFromForm(settingsForm);
+                    InitializeDiagnosticLogger();
+                    SaveSettings();
+                    AddLog("首次配置完成");
+                    return true;
+                }
+
+                var exitResult = MessageBox.Show("必须完成基础配置后才能使用软件，是否退出？", "提示", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (exitResult == DialogResult.Yes)
+                {
+                    ExitApplication();
+                    return false;
+                }
+            }
+        }
+
+        private void SettingsButton_Click(object? sender, EventArgs e)
+        {
+            var settingsForm = new SettingsForm(BuildCurrentSettings());
             if (settingsForm.ShowDialog() == DialogResult.OK)
             {
-                bool themeChanged = !string.Equals(themeMode, settingsForm.ThemeMode, StringComparison.Ordinal);
-                loginUrl = settingsForm.LoginUrl;
-                primaryDns = settingsForm.PrimaryDns;
-                secondaryDns = settingsForm.SecondaryDns;
-                pingTimeout = settingsForm.Timeout;
-                username = settingsForm.Username;
-                password = settingsForm.Password;
-                showNotification = settingsForm.ShowNotification;
-                showTrayNotification = settingsForm.ShowTrayNotification;
-                showRecoveryNotification = settingsForm.ShowRecoveryNotification;
-                autoStart = settingsForm.AutoStart;
-                autoStartMonitoring = settingsForm.AutoStartMonitoring;
-                saveTestResult = settingsForm.SaveTestResult;
-                testResultPath = settingsForm.TestResultPath;
-                enableTimeRange = settingsForm.EnableTimeRange;
-                startTime = settingsForm.StartTime;
-                endTime = settingsForm.EndTime;
-                enableMonitorTimeRange = settingsForm.EnableMonitorTimeRange;
-                monitorStartTime = settingsForm.MonitorStartTime;
-                monitorEndTime = settingsForm.MonitorEndTime;
-                enableAllDayDetection = settingsForm.EnableAllDayDetection;
-                allDayDetectionInterval = settingsForm.AllDayDetectionInterval;
-                allDayAutoLogin = settingsForm.AllDayAutoLogin;
-                themeMode = settingsForm.ThemeMode;
-                loginStrategy = settingsForm.LoginStrategy;
-                loginRetryCount = settingsForm.LoginRetryCount;
-                loginRetryDelay = settingsForm.LoginRetryDelay;
+                ApplySettingsFromForm(settingsForm);
+
+                // 应用日志设置变更
+                InitializeDiagnosticLogger();
 
                 // 保存设置到文件
                 SaveSettings();
-                
-                if (themeChanged)
-                {
-                    MessageBox.Show("设置已保存，主题将在下次启动时生效。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
-                else
-                {
-                    MessageBox.Show("设置已保存", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
+                MessageBox.Show("设置已保存", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 AddLog($"设置已更新: {loginUrl}, DNS: {primaryDns}/{secondaryDns}, 用户名: {username}, 重试{loginRetryCount}次");
             }
         }

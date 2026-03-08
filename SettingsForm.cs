@@ -21,6 +21,8 @@ namespace NetworkMonitor
         private CheckBox saveTestResultCheckBox = null!;
         private TextBox testResultPathTextBox = null!;
         private Button browseButton = null!;
+        private CheckBox saveLogsCheckBox = null!;
+        private NumericUpDown logRetentionDaysInput = null!;
         private Button installServiceButton = null!;
         private Button uninstallServiceButton = null!;
         private Label serviceStatusLabel = null!;
@@ -30,13 +32,13 @@ namespace NetworkMonitor
         private CheckBox enableMonitorTimeRangeCheckBox = null!;
         private DateTimePicker monitorStartTimePicker = null!;
         private DateTimePicker monitorEndTimePicker = null!;
-        private CheckBox enableAllDayDetectionCheckBox = null!;
-        private NumericUpDown allDayDetectionIntervalInput = null!;
-        private CheckBox allDayAutoLoginCheckBox = null!;
         private ComboBox loginStrategyComboBox = null!;
         private NumericUpDown retryCountInput = null!;
         private NumericUpDown retryDelayInput = null!;
-        private ComboBox themeModeComboBox = null!;
+        private ComboBox? themeModeComboBox = null;
+        private Button testLoginButton = null!;
+        private Label loginTestStatusLabel = null!;
+        private bool loginTestPassed = false;
         private Button saveButton = null!;
         private Button cancelButton = null!;
 
@@ -44,8 +46,8 @@ namespace NetworkMonitor
         public string PrimaryDns { get; private set; } = "8.8.8.8";
         public string SecondaryDns { get; private set; } = "114.114.114.114";
         public int Timeout { get; private set; } = 10000;
-        public string Username { get; private set; } = "23325024026";
-        public string Password { get; private set; } = "17881936070";
+        public string Username { get; private set; } = "";
+        public string Password { get; private set; } = "";
         public bool ShowNotification { get; private set; } = true;
         public bool ShowTrayNotification { get; private set; } = true;
         public bool ShowRecoveryNotification { get; private set; } = true;
@@ -53,6 +55,8 @@ namespace NetworkMonitor
         public bool AutoStartMonitoring { get; private set; } = false;
         public bool SaveTestResult { get; private set; } = false;
         public string TestResultPath { get; private set; } = "test_results";
+        public bool SaveLogs { get; private set; } = true;
+        public int LogRetentionDays { get; private set; } = 30;
         public bool EnableTimeRange { get; private set; } = false;
         public TimeSpan StartTime { get; private set; } = new TimeSpan(6, 0, 0);  // 06:00
         public TimeSpan EndTime { get; private set; } = new TimeSpan(23, 0, 0);  // 23:00
@@ -93,6 +97,8 @@ namespace NetworkMonitor
             AutoStartMonitoring = settings.AutoStartMonitoring;
             SaveTestResult = settings.SaveTestResult;
             TestResultPath = settings.TestResultPath;
+            SaveLogs = settings.SaveLogs;
+            LogRetentionDays = Math.Max(1, settings.LogRetentionDays);
             EnableTimeRange = settings.EnableTimeRange;
             
             if (TimeSpan.TryParse(settings.StartTime, out TimeSpan parsedStartTime))
@@ -128,17 +134,16 @@ namespace NetworkMonitor
             autoStartMonitoringCheckBox.Checked = AutoStartMonitoring;
             saveTestResultCheckBox.Checked = SaveTestResult;
             testResultPathTextBox.Text = TestResultPath;
+            saveLogsCheckBox.Checked = SaveLogs;
+            logRetentionDaysInput.Value = LogRetentionDays;
+            logRetentionDaysInput.Enabled = SaveLogs;
             enableTimeRangeCheckBox.Checked = EnableTimeRange;
             startTimePicker.Value = DateTime.Today.Add(StartTime);
             endTimePicker.Value = DateTime.Today.Add(EndTime);
             enableMonitorTimeRangeCheckBox.Checked = EnableMonitorTimeRange;
             monitorStartTimePicker.Value = DateTime.Today.Add(MonitorStartTime);
             monitorEndTimePicker.Value = DateTime.Today.Add(MonitorEndTime);
-            enableAllDayDetectionCheckBox.Checked = EnableAllDayDetection;
-            allDayDetectionIntervalInput.Value = AllDayDetectionInterval;
-            allDayAutoLoginCheckBox.Checked = AllDayAutoLogin;
-            themeModeComboBox.SelectedIndex = ThemeMode == "MintLight" ? 1 : 0;
-            
+
             // 设置登录策略
             switch (LoginStrategy)
             {
@@ -150,6 +155,7 @@ namespace NetworkMonitor
             
             retryCountInput.Value = LoginRetryCount;
             retryDelayInput.Value = LoginRetryDelay;
+            MarkLoginTestPending("未测试");
             RefreshServiceStatus();
         }
 
@@ -247,7 +253,7 @@ namespace NetworkMonitor
             {
                 Location = new Point(150, 205),
                 Size = new Size(260, 25),
-                Text = "23325024026"
+                Text = ""
             };
 
             Label passwordLabel = new Label
@@ -260,16 +266,33 @@ namespace NetworkMonitor
             passwordTextBox = new TextBox
             {
                 Location = new Point(150, 245),
-                Size = new Size(260, 25),
-                Text = "17881936070",
+                Size = new Size(180, 25),
+                Text = "",
                 UseSystemPasswordChar = true
+            };
+
+            testLoginButton = new Button
+            {
+                Text = "测试登录",
+                Location = new Point(340, 243),
+                Size = new Size(70, 28)
+            };
+            testLoginButton.Click += TestLoginButton_Click;
+
+            loginTestStatusLabel = new Label
+            {
+                Text = "登录测试: 未测试",
+                Location = new Point(150, 275),
+                Size = new Size(260, 20),
+                ForeColor = Color.DarkOrange,
+                Font = new Font("微软雅黑", 8)
             };
 
             // 通知设置区域
             Label notificationLabel = new Label
             {
                 Text = "通知设置:",
-                Location = new Point(20, 285),
+                Location = new Point(20, 305),
                 Size = new Size(380, 20),
                 Font = new Font("微软雅黑", 9, FontStyle.Bold)
             };
@@ -277,7 +300,7 @@ namespace NetworkMonitor
             showNotificationCheckBox = new CheckBox
             {
                 Text = "显示弹窗通知",
-                Location = new Point(20, 315),
+                Location = new Point(20, 335),
                 Size = new Size(380, 25),
                 Checked = true
             };
@@ -285,7 +308,7 @@ namespace NetworkMonitor
             showTrayNotificationCheckBox = new CheckBox
             {
                 Text = "显示托盘气泡通知（断网时）",
-                Location = new Point(20, 345),
+                Location = new Point(20, 365),
                 Size = new Size(380, 25),
                 Checked = true
             };
@@ -293,7 +316,7 @@ namespace NetworkMonitor
             showRecoveryNotificationCheckBox = new CheckBox
             {
                 Text = "显示托盘气泡通知（恢复时）",
-                Location = new Point(20, 375),
+                Location = new Point(20, 395),
                 Size = new Size(380, 25),
                 Checked = true
             };
@@ -309,30 +332,10 @@ namespace NetworkMonitor
             autoStartMonitoringCheckBox = new CheckBox
             {
                 Text = "打开程序自动开启监控",
-                Location = new Point(20, 435),
+                Location = new Point(20, 455),
                 Size = new Size(380, 25),
                 Checked = false
             };
-
-            Label themeModeLabel = new Label
-            {
-                Text = "主题模式:",
-                Location = new Point(20, 465),
-                Size = new Size(120, 25)
-            };
-
-            themeModeComboBox = new ComboBox
-            {
-                Location = new Point(150, 465),
-                Size = new Size(260, 25),
-                DropDownStyle = ComboBoxStyle.DropDownList
-            };
-            themeModeComboBox.Items.AddRange(new object[]
-            {
-                "深色科技绿",
-                "浅色薄荷绿"
-            });
-            themeModeComboBox.SelectedIndex = 0;
 
             // 保存测试结果
             saveTestResultCheckBox = new CheckBox
@@ -372,6 +375,35 @@ namespace NetworkMonitor
                 Enabled = false
             };
             browseButton.Click += BrowseButton_Click;
+
+            saveLogsCheckBox = new CheckBox
+            {
+                Text = "是否保存日志",
+                Location = new Point(20, 265),
+                Size = new Size(380, 25),
+                Checked = true
+            };
+            saveLogsCheckBox.CheckedChanged += (s, e) =>
+            {
+                logRetentionDaysInput.Enabled = saveLogsCheckBox.Checked;
+            };
+
+            var logRetentionLabel = new Label
+            {
+                Text = "日志保存时间(天):",
+                Location = new Point(20, 300),
+                Size = new Size(120, 25)
+            };
+
+            logRetentionDaysInput = new NumericUpDown
+            {
+                Location = new Point(150, 300),
+                Size = new Size(120, 25),
+                Minimum = 1,
+                Maximum = 365,
+                Value = 30,
+                Enabled = true
+            };
 
             var serviceLabel = new Label
             {
@@ -520,43 +552,11 @@ namespace NetworkMonitor
                 ForeColor = Color.Gray
             };
 
-            enableAllDayDetectionCheckBox = new CheckBox
-            {
-                Text = "启用监控时间外全天检测",
-                Location = new Point(20, 230),
-                Size = new Size(380, 25),
-                Checked = false
-            };
-
-            Label allDayIntervalLabel = new Label
-            {
-                Text = "时间外检测间隔(秒):",
-                Location = new Point(20, 265),
-                Size = new Size(130, 25)
-            };
-
-            allDayDetectionIntervalInput = new NumericUpDown
-            {
-                Location = new Point(150, 265),
-                Size = new Size(120, 25),
-                Minimum = 10,
-                Maximum = 3600,
-                Value = 60
-            };
-
-            allDayAutoLoginCheckBox = new CheckBox
-            {
-                Text = "时间外检测到断网时自动登录",
-                Location = new Point(20, 300),
-                Size = new Size(380, 25),
-                Checked = false
-            };
-
             // 登录策略设置
             Label strategyLabel = new Label
             {
                 Text = "登录策略设置:",
-                Location = new Point(20, 335),
+                Location = new Point(20, 230),
                 Size = new Size(380, 20),
                 Font = new Font("微软雅黑", 9, FontStyle.Bold)
             };
@@ -564,13 +564,13 @@ namespace NetworkMonitor
             Label loginStrategyLabel = new Label
             {
                 Text = "登录策略:",
-                Location = new Point(20, 365),
+                Location = new Point(20, 260),
                 Size = new Size(120, 25)
             };
 
             loginStrategyComboBox = new ComboBox
             {
-                Location = new Point(150, 365),
+                Location = new Point(150, 260),
                 Size = new Size(260, 25),
                 DropDownStyle = ComboBoxStyle.DropDownList
             };
@@ -584,13 +584,13 @@ namespace NetworkMonitor
             Label retryCountLabel = new Label
             {
                 Text = "失败重试次数:",
-                Location = new Point(20, 405),
+                Location = new Point(20, 300),
                 Size = new Size(120, 25)
             };
 
             retryCountInput = new NumericUpDown
             {
-                Location = new Point(150, 405),
+                Location = new Point(150, 300),
                 Size = new Size(260, 25),
                 Minimum = 0,
                 Maximum = 1000,
@@ -600,13 +600,13 @@ namespace NetworkMonitor
             Label retryDelayLabel = new Label
             {
                 Text = "重试间隔(秒):",
-                Location = new Point(20, 445),
+                Location = new Point(20, 340),
                 Size = new Size(120, 25)
             };
 
             retryDelayInput = new NumericUpDown
             {
-                Location = new Point(150, 445),
+                Location = new Point(150, 340),
                 Size = new Size(260, 25),
                 Minimum = 1,
                 Maximum = 60,
@@ -657,23 +657,33 @@ namespace NetworkMonitor
             {
                 Text = "查看 MIT 协议全文",
                 Location = new Point(20, 180),
-                Size = new Size(200, 25)
+                Size = new Size(220, 25)
             };
-            mitLinkLabel.LinkClicked += (_, _) =>
+            mitLinkLabel.LinkClicked += (_, _) => OpenUrl("https://opensource.org/licenses/MIT");
+
+            var githubLinkLabel = new LinkLabel
             {
-                try
-                {
-                    Process.Start(new ProcessStartInfo
-                    {
-                        FileName = "https://opensource.org/licenses/MIT",
-                        UseShellExecute = true
-                    });
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"无法打开链接: {ex.Message}", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                }
+                Text = "GitHub 页面",
+                Location = new Point(20, 210),
+                Size = new Size(220, 25)
             };
+            githubLinkLabel.LinkClicked += (_, _) => OpenUrl("https://github.com/gggtttfff/NetworkMonitor");
+
+            var giteeLinkLabel = new LinkLabel
+            {
+                Text = "Gitee 页面",
+                Location = new Point(20, 240),
+                Size = new Size(220, 25)
+            };
+            giteeLinkLabel.LinkClicked += (_, _) => OpenUrl("https://gitee.com/pieory/NetworkMonitor");
+
+            var feedbackLinkLabel = new LinkLabel
+            {
+                Text = "反馈 (GitHub)",
+                Location = new Point(20, 270),
+                Size = new Size(220, 25)
+            };
+            feedbackLinkLabel.LinkClicked += (_, _) => OpenUrl("https://github.com/gggtttfff/NetworkMonitor/issues");
 
             basicTab.Controls.Add(loginUrlLabel);
             basicTab.Controls.Add(loginUrlTextBox);
@@ -688,13 +698,13 @@ namespace NetworkMonitor
             basicTab.Controls.Add(usernameTextBox);
             basicTab.Controls.Add(passwordLabel);
             basicTab.Controls.Add(passwordTextBox);
+            basicTab.Controls.Add(testLoginButton);
+            basicTab.Controls.Add(loginTestStatusLabel);
             basicTab.Controls.Add(notificationLabel);
             basicTab.Controls.Add(showNotificationCheckBox);
             basicTab.Controls.Add(showTrayNotificationCheckBox);
             basicTab.Controls.Add(showRecoveryNotificationCheckBox);
             basicTab.Controls.Add(autoStartMonitoringCheckBox);
-            basicTab.Controls.Add(themeModeLabel);
-            basicTab.Controls.Add(themeModeComboBox);
 
             policyTab.Controls.Add(enableTimeRangeCheckBox);
             policyTab.Controls.Add(timeRangeLabel);
@@ -708,10 +718,6 @@ namespace NetworkMonitor
             policyTab.Controls.Add(monitorToLabel);
             policyTab.Controls.Add(monitorEndTimePicker);
             policyTab.Controls.Add(monitorTimeHint);
-            policyTab.Controls.Add(enableAllDayDetectionCheckBox);
-            policyTab.Controls.Add(allDayIntervalLabel);
-            policyTab.Controls.Add(allDayDetectionIntervalInput);
-            policyTab.Controls.Add(allDayAutoLoginCheckBox);
             policyTab.Controls.Add(strategyLabel);
             policyTab.Controls.Add(loginStrategyLabel);
             policyTab.Controls.Add(loginStrategyComboBox);
@@ -729,11 +735,17 @@ namespace NetworkMonitor
             advancedTab.Controls.Add(testPathLabel);
             advancedTab.Controls.Add(testResultPathTextBox);
             advancedTab.Controls.Add(browseButton);
+            advancedTab.Controls.Add(saveLogsCheckBox);
+            advancedTab.Controls.Add(logRetentionLabel);
+            advancedTab.Controls.Add(logRetentionDaysInput);
             aboutTab.Controls.Add(aboutTitleLabel);
             aboutTab.Controls.Add(authorLabel);
             aboutTab.Controls.Add(versionLabel);
             aboutTab.Controls.Add(licenseLabel);
             aboutTab.Controls.Add(mitLinkLabel);
+            aboutTab.Controls.Add(githubLinkLabel);
+            aboutTab.Controls.Add(giteeLinkLabel);
+            aboutTab.Controls.Add(feedbackLinkLabel);
 
             tabControl.TabPages.Add(basicTab);
             tabControl.TabPages.Add(policyTab);
@@ -763,8 +775,13 @@ namespace NetworkMonitor
             this.Controls.Add(saveButton);
             this.Controls.Add(cancelButton);
 
+            loginUrlTextBox.TextChanged += (_, _) => MarkLoginTestPending("配置已更改，请重新测试");
+            usernameTextBox.TextChanged += (_, _) => MarkLoginTestPending("配置已更改，请重新测试");
+            passwordTextBox.TextChanged += (_, _) => MarkLoginTestPending("配置已更改，请重新测试");
+
             this.AcceptButton = saveButton;
             this.CancelButton = cancelButton;
+            MarkLoginTestPending("未测试");
             RefreshServiceStatus();
         }
 
@@ -803,6 +820,12 @@ namespace NetworkMonitor
                 return;
             }
 
+            if (!loginTestPassed)
+            {
+                MessageBox.Show("请先点击“测试登录”并通过后再保存设置", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
             LoginUrl = loginUrlTextBox.Text.Trim();
             PrimaryDns = primaryDnsTextBox.Text.Trim();
             SecondaryDns = secondaryDnsTextBox.Text.Trim();
@@ -816,17 +839,16 @@ namespace NetworkMonitor
             AutoStartMonitoring = autoStartMonitoringCheckBox.Checked;
             SaveTestResult = saveTestResultCheckBox.Checked;
             TestResultPath = testResultPathTextBox.Text.Trim();
+            SaveLogs = saveLogsCheckBox.Checked;
+            LogRetentionDays = (int)logRetentionDaysInput.Value;
             EnableTimeRange = enableTimeRangeCheckBox.Checked;
             StartTime = startTimePicker.Value.TimeOfDay;
             EndTime = endTimePicker.Value.TimeOfDay;
             EnableMonitorTimeRange = enableMonitorTimeRangeCheckBox.Checked;
             MonitorStartTime = monitorStartTimePicker.Value.TimeOfDay;
             MonitorEndTime = monitorEndTimePicker.Value.TimeOfDay;
-            EnableAllDayDetection = enableAllDayDetectionCheckBox.Checked;
-            AllDayDetectionInterval = (int)allDayDetectionIntervalInput.Value;
-            AllDayAutoLogin = allDayAutoLoginCheckBox.Checked;
-            ThemeMode = themeModeComboBox.SelectedIndex == 1 ? "MintLight" : "TechDark";
-            
+            ThemeMode = "TechDark";
+
             // 登录策略映射
             switch (loginStrategyComboBox.SelectedIndex)
             {
@@ -838,6 +860,78 @@ namespace NetworkMonitor
             
             LoginRetryCount = (int)retryCountInput.Value;
             LoginRetryDelay = (int)retryDelayInput.Value;
+        }
+
+        private async void TestLoginButton_Click(object? sender, EventArgs e)
+        {
+            if (string.IsNullOrWhiteSpace(loginUrlTextBox.Text) ||
+                string.IsNullOrWhiteSpace(usernameTextBox.Text) ||
+                string.IsNullOrWhiteSpace(passwordTextBox.Text))
+            {
+                MessageBox.Show("请先填写登录地址、用户名和密码", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            testLoginButton.Enabled = false;
+            loginTestStatusLabel.Text = "登录测试: 测试中...";
+            loginTestStatusLabel.ForeColor = Color.DodgerBlue;
+
+            try
+            {
+                var authenticator = new CampusNetworkAuthenticator(
+                    loginUrlTextBox.Text.Trim(),
+                    usernameTextBox.Text.Trim(),
+                    passwordTextBox.Text.Trim());
+
+                var result = await authenticator.AuthenticateAsync();
+                if (result.Success)
+                {
+                    MarkLoginTestPassed();
+                    MessageBox.Show("登录测试通过", "成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                else
+                {
+                    MarkLoginTestPending("失败，请检查配置");
+                    MessageBox.Show($"登录测试失败: {result.Message}", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+            catch (Exception ex)
+            {
+                MarkLoginTestPending("失败，请检查网络");
+                MessageBox.Show($"登录测试异常: {ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            finally
+            {
+                testLoginButton.Enabled = true;
+            }
+        }
+
+        private void MarkLoginTestPending(string reason)
+        {
+            loginTestPassed = false;
+            if (saveButton != null)
+            {
+                saveButton.Enabled = false;
+            }
+            if (loginTestStatusLabel != null)
+            {
+                loginTestStatusLabel.Text = $"登录测试: {reason}";
+                loginTestStatusLabel.ForeColor = Color.DarkOrange;
+            }
+        }
+
+        private void MarkLoginTestPassed()
+        {
+            loginTestPassed = true;
+            if (saveButton != null)
+            {
+                saveButton.Enabled = true;
+            }
+            if (loginTestStatusLabel != null)
+            {
+                loginTestStatusLabel.Text = "登录测试: 已通过";
+                loginTestStatusLabel.ForeColor = Color.Green;
+            }
         }
 
         private void InstallServiceButton_Click(object? sender, EventArgs e)
@@ -864,6 +958,22 @@ namespace NetworkMonitor
             autoStartCheckBox.Checked = installed;
             serviceStatusLabel.Text = installed ? "已安装（开机启动已启用）" : "未安装";
             serviceStatusLabel.ForeColor = installed ? Color.Green : Color.DarkRed;
+        }
+
+        private void OpenUrl(string url)
+        {
+            try
+            {
+                Process.Start(new ProcessStartInfo
+                {
+                    FileName = url,
+                    UseShellExecute = true
+                });
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"无法打开链接: {ex.Message}", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
         }
 
         private void BrowseButton_Click(object? sender, EventArgs e)

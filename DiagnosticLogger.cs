@@ -26,6 +26,7 @@ namespace NetworkMonitor
         private readonly string _logDirectory;
         private readonly long _maxLogFileSizeBytes;
         private readonly int _maxLogFileCount;
+        private readonly int _retentionDays;
         private StreamWriter? _currentWriter;
         private string _currentLogFilePath = "";
         private readonly SemaphoreSlim _writeLock = new SemaphoreSlim(1, 1);
@@ -42,11 +43,13 @@ namespace NetworkMonitor
         /// <param name="logDirectory">日志目录</param>
         /// <param name="maxLogFileSizeMB">单个日志文件最大大小（MB），默认10MB</param>
         /// <param name="maxLogFileCount">最多保留日志文件数量，默认30个</param>
-        public DiagnosticLogger(string? logDirectory = null, int maxLogFileSizeMB = 10, int maxLogFileCount = 30)
+        /// <param name="retentionDays">日志保留天数，默认30天</param>
+        public DiagnosticLogger(string? logDirectory = null, int maxLogFileSizeMB = 10, int maxLogFileCount = 30, int retentionDays = 30)
         {
             _logDirectory = logDirectory ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs");
             _maxLogFileSizeBytes = maxLogFileSizeMB * 1024 * 1024;
             _maxLogFileCount = maxLogFileCount;
+            _retentionDays = Math.Max(1, retentionDays);
 
             // 创建日志目录
             if (!Directory.Exists(_logDirectory))
@@ -118,8 +121,27 @@ namespace NetworkMonitor
             try
             {
                 var logFiles = Directory.GetFiles(_logDirectory, "network_monitor_*.log");
+                var expireBefore = DateTime.Now.AddDays(-_retentionDays);
 
-                // 按修改时间排序
+                // 先按天数清理
+                foreach (var logFile in logFiles)
+                {
+                    try
+                    {
+                        var info = new FileInfo(logFile);
+                        if (info.LastWriteTime < expireBefore)
+                        {
+                            File.Delete(logFile);
+                        }
+                    }
+                    catch
+                    {
+                        // 忽略删除失败
+                    }
+                }
+
+                // 再按数量上限清理
+                logFiles = Directory.GetFiles(_logDirectory, "network_monitor_*.log");
                 Array.Sort(logFiles, (a, b) =>
                 {
                     var fileA = new FileInfo(a);
@@ -127,7 +149,6 @@ namespace NetworkMonitor
                     return fileB.LastWriteTime.CompareTo(fileA.LastWriteTime);
                 });
 
-                // 删除超过数量限制的旧文件
                 if (logFiles.Length > _maxLogFileCount)
                 {
                     for (int i = _maxLogFileCount; i < logFiles.Length; i++)
