@@ -667,7 +667,7 @@ namespace NetworkMonitor
 
             var versionLabel = new Label
             {
-                Text = "版本: V1.0.0",
+                Text = $"版本: V{AppVersionProvider.GetDisplayVersion()}",
                 Location = new Point(20, 110),
                 Size = new Size(320, 25)
             };

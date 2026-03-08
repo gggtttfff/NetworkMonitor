@@ -1,5 +1,5 @@
 param(
-    [string]$Version = "1.0.0",
+    [string]$Version = "",
     [string]$Configuration = "Release",
     [string]$Runtime = "win-x64",
     [string]$InnoSetupCompiler = "$Env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe"
@@ -19,6 +19,14 @@ if (!(Test-Path $projectFile)) {
 
 if (!(Test-Path $issFile)) {
     throw "Installer script not found: $issFile"
+}
+
+if ([string]::IsNullOrWhiteSpace($Version)) {
+    [xml]$projectXml = Get-Content -Path $projectFile -Encoding UTF8
+    $Version = $projectXml.Project.PropertyGroup.Version | Select-Object -First 1
+    if ([string]::IsNullOrWhiteSpace($Version)) {
+        throw "Version was not provided and no <Version> was found in $projectFile"
+    }
 }
 
 Write-Host "[1/3] Publishing application..." -ForegroundColor Cyan
