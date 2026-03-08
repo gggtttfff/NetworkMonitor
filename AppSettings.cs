@@ -16,6 +16,7 @@ namespace NetworkMonitor
         public bool ShowNotification { get; set; } = true;
         public bool ShowTrayNotification { get; set; } = true;
         public bool ShowRecoveryNotification { get; set; } = true;
+        public bool CloseToTrayOnClose { get; set; } = true;
         public bool AutoStart { get; set; } = false; // 开机自启动程序（服务安装状态）
         public bool AutoStartMonitoring { get; set; } = false; // 打开程序自动开启监控
         public bool LastMonitoringEnabled { get; set; } = false; // 程序关闭时是否处于监控中

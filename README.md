@@ -52,6 +52,24 @@ powershell -ExecutionPolicy Bypass -File .\build-installer.ps1 -Version "1.0.0"
 安装包输出目录：
 - `out\installer\NetworkMonitor-Setup-<版本号>.exe`
 
+## GitHub 自动部署
+仓库已配置 GitHub Actions 工作流 [`.github/workflows/dotnet-desktop.yml`](./.github/workflows/dotnet-desktop.yml)：
+
+- 推送到 `master` 时自动构建并上传发布产物
+- 推送 `v*` 标签时自动生成安装包并创建 GitHub Release
+- Release 附件包含 zip 包和 Inno Setup 安装包
+
+发布示例：
+
+```powershell
+git tag v1.0.0
+git push origin v1.0.0
+```
+
+说明：
+- 自动发布依赖 GitHub 默认提供的 `GITHUB_TOKEN`
+- 工作流会在 `windows-latest` 上安装 Inno Setup 后再生成安装包
+
 ## 使用说明
 1. 启动程序。
 2. 打开设置，配置登录地址、账号和密码。

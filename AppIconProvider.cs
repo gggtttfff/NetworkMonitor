@@ -16,7 +16,15 @@ namespace NetworkMonitor
                 return _cachedIcon;
             }
 
-            // 优先读取可执行文件自身图标，发布后最稳定
+            // 优先读取外部 app.ico，避免在开发阶段拿到默认 EXE 图标
+            string iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "app.ico");
+            if (File.Exists(iconPath))
+            {
+                _cachedIcon = new Icon(iconPath);
+                return _cachedIcon;
+            }
+
+            // 回退读取可执行文件关联图标
             var exeIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
             if (exeIcon != null)
             {
@@ -24,17 +32,7 @@ namespace NetworkMonitor
                 return _cachedIcon;
             }
 
-            // 回退到外部 app.ico
-            string iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "app.ico");
-            if (File.Exists(iconPath))
-            {
-                _cachedIcon = new Icon(iconPath);
-            }
-            else
-            {
-                _cachedIcon = SystemIcons.Application;
-            }
-
+            _cachedIcon = SystemIcons.Application;
             return _cachedIcon;
         }
     }

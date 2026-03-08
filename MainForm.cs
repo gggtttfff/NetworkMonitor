@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
+using System.Drawing.Drawing2D;
 using System.IO;
 using System.Linq;
 using System.Media;
@@ -20,7 +22,9 @@ namespace NetworkMonitor
     {
         private System.Windows.Forms.Timer networkCheckTimer = null!;
         private System.Windows.Forms.Timer logUpdateTimer = null!;
-        private Label statusLabel = null!;
+        private RoundedSurfacePanel statusTagPanel = null!;
+        private Label statusTagLabel = null!;
+        private Label statusTagDot = null!;
         private RoundedButton startButton = null!;
         private RoundedButton stopButton = null!;
         private RoundedButton settingsButton = null!;
@@ -57,6 +61,7 @@ namespace NetworkMonitor
         private bool showNotification = true;
         private bool showTrayNotification = true;
         private bool showRecoveryNotification = true;
+        private bool closeToTrayOnClose = true;
         private bool autoStart = false; // 开机自启动程序（服务安装状态）
         private bool autoStartMonitoring = false; // 打开程序自动开启监控
         private bool lastMonitoringEnabled = false; // 上次关闭程序时是否在监控
@@ -86,6 +91,7 @@ namespace NetworkMonitor
         private DateTime? lastLoginAttemptTime = null;
         private Label lastDisconnectLabel = null!;
         private Label lastLoginAttemptLabel = null!;
+        private string currentStatusText = string.Empty;
 
         // 引入Windows API调整系统音量
         [DllImport("winmm.dll")]
@@ -97,10 +103,90 @@ namespace NetworkMonitor
         [DllImport("dwmapi.dll")]
         private static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
 
+        [DllImport("user32.dll")]
+        private static extern bool ReleaseCapture();
+
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
         private const int DWMWA_CAPTION_COLOR = 35;
         private const int DWMWA_TEXT_COLOR = 36;
+        private const int WM_NCLBUTTONDOWN = 0xA1;
+        private const int HTCAPTION = 0x2;
 
         private uint originalVolume = 0;
+        private static readonly Color StatusTagBorderColor = Color.FromArgb(10, 0, 0, 0);
+        private static readonly Color StatusTagTextColor = Color.FromArgb(0, 0, 0);
+        private static readonly Color StatusTagConnectedColor = Color.FromArgb(68, 200, 77);
+        private static readonly Color StatusTagFailedColor = Color.FromArgb(221, 71, 71);
+        private static readonly Color StatusTagPendingColor = Color.FromArgb(221, 203, 71);
+        private static readonly Color StatusTagUnknownColor = Color.FromArgb(148, 163, 184);
+
+        private enum StatusTagKind
+        {
+            Connected = 0,
+            Failed = 1,
+            Pending = 2,
+            Unknown = 3
+        }
+
+        private sealed class RoundedSurfacePanel : Panel
+        {
+            [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+            public int CornerRadius { get; set; } = 16;
+
+            [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+            public int BorderWidth { get; set; } = 0;
+
+            [DesignerSerializationVisibility(DesignerSerializationVisibility.Hidden)]
+            public Color BorderColor { get; set; } = Color.Transparent;
+
+            protected override void OnPaint(PaintEventArgs e)
+            {
+                base.OnPaint(e);
+
+                e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+                var borderOffset = Math.Max(0, BorderWidth - 1);
+                var surfaceBounds = new Rectangle(
+                    borderOffset,
+                    borderOffset,
+                    Math.Max(1, ClientRectangle.Width - borderOffset * 2 - 1),
+                    Math.Max(1, ClientRectangle.Height - borderOffset * 2 - 1));
+                using var path = CreateRoundedPath(surfaceBounds, CornerRadius);
+                using var brush = new SolidBrush(BackColor);
+                e.Graphics.FillPath(brush, path);
+
+                if (BorderWidth > 0)
+                {
+                    using var pen = new Pen(BorderColor, BorderWidth);
+                    e.Graphics.DrawPath(pen, path);
+                }
+            }
+
+            protected override void OnResize(EventArgs eventargs)
+            {
+                base.OnResize(eventargs);
+                using var path = CreateRoundedPath(ClientRectangle, CornerRadius);
+                Region = new Region(path);
+            }
+
+            private static GraphicsPath CreateRoundedPath(Rectangle bounds, int radius)
+            {
+                var path = new GraphicsPath();
+                int diameter = Math.Max(1, radius * 2);
+                var arc = new Rectangle(bounds.Location, new Size(diameter, diameter));
+
+                path.AddArc(arc, 180, 90);
+                arc.X = bounds.Right - diameter;
+                path.AddArc(arc, 270, 90);
+                arc.Y = bounds.Bottom - diameter;
+                path.AddArc(arc, 0, 90);
+                arc.X = bounds.Left;
+                path.AddArc(arc, 90, 90);
+                path.CloseFigure();
+                return path;
+            }
+        }
 
         public MainForm()
         {
@@ -131,6 +217,7 @@ namespace NetworkMonitor
                 showNotification = settings.ShowNotification;
                 showTrayNotification = settings.ShowTrayNotification;
                 showRecoveryNotification = settings.ShowRecoveryNotification;
+                closeToTrayOnClose = settings.CloseToTrayOnClose;
                 autoStart = StartupServiceManager.IsInstalled();
                 autoStartMonitoring = settings.AutoStartMonitoring;
                 lastMonitoringEnabled = settings.LastMonitoringEnabled;
@@ -196,6 +283,7 @@ namespace NetworkMonitor
                     ShowNotification = showNotification,
                     ShowTrayNotification = showTrayNotification,
                     ShowRecoveryNotification = showRecoveryNotification,
+                    CloseToTrayOnClose = closeToTrayOnClose,
                     AutoStart = autoStart,
                     AutoStartMonitoring = autoStartMonitoring,
                     LastMonitoringEnabled = isMonitoring,
@@ -234,15 +322,13 @@ namespace NetworkMonitor
                         
                         if (isConnected)
                         {
-                            statusLabel.Text = "状态: 网络正常";
-                            statusLabel.ForeColor = UiTheme.PrimaryGreen;
+                            SetStatusBadge("网络正常", UiTheme.PrimaryGreen);
                             notifyIcon.Icon = appIcon;
                             notifyIcon.Text = "网络监控工具 - 网络正常";
                         }
                         else
                         {
-                            statusLabel.Text = "状态: 网络断开!";
-                            statusLabel.ForeColor = UiTheme.Error;
+                            SetStatusBadge("网络断开", UiTheme.Error);
                             notifyIcon.Icon = appIcon;
                             notifyIcon.Text = "网络监控工具 - 网络断开";
                         }
@@ -362,6 +448,107 @@ namespace NetworkMonitor
             }
         }
 
+        private void EnableWindowDrag(Control control)
+        {
+            control.MouseDown += (_, e) =>
+            {
+                if (e.Button != MouseButtons.Left)
+                {
+                    return;
+                }
+
+                ReleaseCapture();
+                SendMessage(Handle, WM_NCLBUTTONDOWN, (IntPtr)HTCAPTION, IntPtr.Zero);
+            };
+        }
+
+        private void SetStatusBadge(string text, Color accentColor)
+        {
+            currentStatusText = text;
+            UpdateStatusTag(ResolveStatusTagKind(text, accentColor));
+        }
+
+        private static StatusTagKind ResolveStatusTagKind(string text, Color accentColor)
+        {
+            if (text == "网络正常" || text == "运行中" || text == "已连接校园网" || accentColor == UiTheme.PrimaryGreen)
+            {
+                return StatusTagKind.Connected;
+            }
+
+            if (text == "网络断开" || text == "网络故障" || accentColor == UiTheme.Error)
+            {
+                return StatusTagKind.Failed;
+            }
+
+            if (text == "正在尝试.." || text == "正在尝试" || text == "检测中")
+            {
+                return StatusTagKind.Pending;
+            }
+
+            return StatusTagKind.Unknown;
+        }
+
+        private void UpdateStatusTag(StatusTagKind selectedKind)
+        {
+            if (statusTagPanel == null || statusTagLabel == null || statusTagDot == null)
+            {
+                return;
+            }
+
+            string displayText;
+            Color dotColor;
+            switch (selectedKind)
+            {
+                case StatusTagKind.Connected:
+                    displayText = "连接正常";
+                    dotColor = StatusTagConnectedColor;
+                    break;
+                case StatusTagKind.Failed:
+                    displayText = "连接失败";
+                    dotColor = StatusTagFailedColor;
+                    break;
+                case StatusTagKind.Pending:
+                    displayText = "正在尝试..";
+                    dotColor = StatusTagPendingColor;
+                    break;
+                default:
+                    displayText = "未知状态";
+                    dotColor = StatusTagUnknownColor;
+                    break;
+            }
+
+            statusTagLabel.Text = displayText;
+            statusTagLabel.ForeColor = StatusTagTextColor;
+            statusTagDot.ForeColor = dotColor;
+            statusTagPanel.BackColor = Color.FromArgb(253, 250, 250);
+            statusTagPanel.BorderColor = StatusTagBorderColor;
+            statusTagPanel.BorderWidth = 1;
+
+            int dotLeft = 16;
+            int gap = 10;
+            int rightPadding = 16;
+            int textWidth = TextRenderer.MeasureText(displayText, statusTagLabel.Font).Width;
+            statusTagLabel.Location = new Point(dotLeft + statusTagDot.Width + gap, 8);
+            statusTagLabel.Size = new Size(textWidth + 4, 20);
+            statusTagPanel.Size = new Size(statusTagLabel.Right + rightPadding, 36);
+            statusTagPanel.CornerRadius = statusTagPanel.Height / 2;
+            statusTagDot.Location = new Point(dotLeft, 8);
+            statusTagPanel.Invalidate();
+        }
+
+        private void ToggleWindowState(Button maximizeButton)
+        {
+            if (WindowState == FormWindowState.Maximized)
+            {
+                WindowState = FormWindowState.Normal;
+                maximizeButton.Text = "□";
+                return;
+            }
+
+            WindowState = FormWindowState.Maximized;
+            maximizeButton.Text = "❐";
+        }
+
         private void InitializeComponents()
         {
             this.Text = "网络监控工具";
@@ -370,6 +557,7 @@ namespace NetworkMonitor
             this.StartPosition = FormStartPosition.CenterScreen;
             this.Icon = appIcon;
             this.BackColor = Color.FromArgb(255, 255, 255);
+            this.FormBorderStyle = FormBorderStyle.None;
             this.HandleCreated += (_, _) => TryApplyBlankCaption();
 
             // 初始化系统托盘图标
@@ -410,55 +598,87 @@ namespace NetworkMonitor
             var sideHeader = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = 72,
-                Padding = new Padding(16, 16, 16, 16),
+                Height = 108,
                 BackColor = Color.FromArgb(250, 250, 250)
+            };
+
+            var sideHeaderContent = new Panel
+            {
+                Size = new Size(218, 36),
+                Location = new Point(0, 26),
+                BackColor = Color.Transparent
             };
 
             var sideHeaderIcon = new PictureBox
             {
-                Location = new Point(8, 0),
+                Location = new Point(0, 0),
                 Size = new Size(32, 32),
                 SizeMode = PictureBoxSizeMode.Zoom,
-                Image = appIcon.ToBitmap()
+                Image = appIcon.ToBitmap(),
+                BackColor = Color.Transparent
             };
 
             var sideHeaderText = new Label
             {
                 Text = "网络监控工具",
-                Location = new Point(50, 4),
-                Size = new Size(160, 24),
-                Font = new System.Drawing.Font("微软雅黑", 12, FontStyle.Bold),
+                Location = new Point(42, 4),
+                Size = new Size(176, 28),
+                Font = new System.Drawing.Font("微软雅黑", 13.5F, FontStyle.Bold),
                 ForeColor = Color.FromArgb(31, 41, 55),
                 BackColor = Color.Transparent
             };
-            sideHeader.Controls.Add(sideHeaderIcon);
-            sideHeader.Controls.Add(sideHeaderText);
+
+            void CenterSideHeaderContent()
+            {
+                sideHeaderContent.Left = Math.Max(0, (sideHeader.ClientSize.Width - sideHeaderContent.Width) / 2);
+            }
+
+            sideHeaderContent.Controls.Add(sideHeaderIcon);
+            sideHeaderContent.Controls.Add(sideHeaderText);
+            sideHeader.Controls.Add(sideHeaderContent);
+            sideHeader.Resize += (_, _) => CenterSideHeaderContent();
+            CenterSideHeaderContent();
 
             Label topTitle = new Label();
+
+            Image LoadNavIcon(string fileName)
+            {
+                string iconPath = Path.Combine(AppContext.BaseDirectory, "Static", "Icons", fileName);
+                return File.Exists(iconPath)
+                    ? Image.FromFile(iconPath)
+                    : new Bitmap(1, 1);
+            }
 
             RoundedButton navServerButton = new RoundedButton
             {
                 Text = "监控中心",
                 Dock = DockStyle.Top,
-                Height = 42,
-                BackColor = UiTheme.Panel,
-                ForeColor = Color.FromArgb(31, 41, 55),
+                Height = 46,
+                BackColor = Color.Transparent,
+                HoverBackColor = Color.Transparent,
+                ForeColor = Color.Black,
                 TextAlign = ContentAlignment.MiddleLeft,
-                Padding = new Padding(16, 0, 0, 0),
-                BorderRadius = 0
+                Padding = new Padding(18, 0, 12, 0),
+                BorderRadius = 0,
+                ShowBorder = false,
+                Font = new Font("微软雅黑", 11.5F, FontStyle.Bold),
+                Image = LoadNavIcon("nav-monitor-heart.png")
             };
 
             RoundedButton navIntegrationButton = new RoundedButton
             {
                 Text = "认证登录",
                 Dock = DockStyle.Top,
-                Height = 42,
-                BackColor = UiTheme.BgDark,
-                ForeColor = UiTheme.TextPrimary,
+                Height = 46,
+                BackColor = Color.Transparent,
+                HoverBackColor = Color.Transparent,
+                ForeColor = Color.Black,
                 TextAlign = ContentAlignment.MiddleLeft,
-                Padding = new Padding(16, 0, 0, 0),
-                BorderRadius = 0
+                Padding = new Padding(18, 0, 12, 0),
+                BorderRadius = 0,
+                ShowBorder = false,
+                Font = new Font("微软雅黑", 11.5F, FontStyle.Bold),
+                Image = LoadNavIcon("nav-login.png")
             };
 
 
@@ -466,25 +686,32 @@ namespace NetworkMonitor
             {
                 Text = "设置",
                 Dock = DockStyle.Bottom,
-                Height = 46,
-                BackColor = UiTheme.BgDark,
-                ForeColor = UiTheme.TextPrimary,
+                Height = 50,
+                BackColor = Color.Transparent,
+                HoverBackColor = Color.Transparent,
+                ForeColor = Color.Black,
                 TextAlign = ContentAlignment.MiddleLeft,
-                Padding = new Padding(16, 0, 0, 0),
-                BorderRadius = 0
+                Padding = new Padding(18, 0, 12, 0),
+                BorderRadius = 0,
+                ShowBorder = false,
+                Font = new Font("微软雅黑", 11.5F, FontStyle.Bold),
+                Image = LoadNavIcon("nav-settings.png")
             };
             settingsButton.Click += SettingsButton_Click;
 
             var navButtons = new[] { navServerButton, navIntegrationButton, settingsButton };
             RoundedButton activeNavButton = navServerButton;
-            Color navNormalColor = Color.FromArgb(250, 250, 250);
-            Color navActiveColor = Color.FromArgb(245, 245, 245);
+            Color navNormalColor = Color.Transparent;
+            Color navHoverColor = Color.FromArgb(238, 238, 238);
+            Color navActiveColor = Color.FromArgb(230, 230, 230);
 
             void SetActiveNav(RoundedButton selectedButton, string title)
             {
                 foreach (var btn in navButtons)
                 {
                     btn.BackColor = btn == selectedButton ? navActiveColor : navNormalColor;
+                    btn.HoverBackColor = btn == selectedButton ? navActiveColor : navHoverColor;
+                    btn.ForeColor = Color.Black;
                 }
                 activeNavButton = selectedButton;
                 topTitle.Text = title;
@@ -496,7 +723,7 @@ namespace NetworkMonitor
                 {
                     if (btn != activeNavButton)
                     {
-                        btn.BackColor = navActiveColor;
+                        btn.BackColor = navHoverColor;
                     }
                 };
 
@@ -531,20 +758,74 @@ namespace NetworkMonitor
             var topBar = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = 62,
-                BackColor = Color.FromArgb(255, 255, 255)
+                Height = 42,
+                BackColor = Color.FromArgb(243, 243, 243)
             };
 
             topTitle = new Label
             {
                 Text = "监控中心",
-                Location = new Point(16, 18),
+                Location = new Point(16, 10),
                 Size = new Size(180, 28),
                 Font = new Font("微软雅黑", 12, FontStyle.Regular),
                 ForeColor = Color.FromArgb(31, 41, 55)
             };
 
+            var windowButtonPanel = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Right,
+                Width = 138,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                Padding = new Padding(0),
+                Margin = new Padding(0),
+                BackColor = Color.FromArgb(243, 243, 243)
+            };
+
+            Button CreateWindowButton(string text)
+            {
+                return new Button
+                {
+                    Text = text,
+                    Size = new Size(46, 32),
+                    FlatStyle = FlatStyle.Flat,
+                    BackColor = Color.FromArgb(243, 243, 243),
+                    ForeColor = Color.FromArgb(31, 41, 55),
+                    Font = new Font("Segoe UI Symbol", 10F, FontStyle.Regular),
+                    TabStop = false,
+                    Margin = new Padding(0)
+                };
+            }
+
+            var minimizeButton = CreateWindowButton("－");
+            var maximizeButton = CreateWindowButton("□");
+            var closeButton = CreateWindowButton("✕");
+
+            foreach (var button in new[] { minimizeButton, maximizeButton, closeButton })
+            {
+                button.FlatAppearance.BorderSize = 0;
+                button.FlatAppearance.MouseOverBackColor = Color.FromArgb(229, 229, 229);
+                button.FlatAppearance.MouseDownBackColor = Color.FromArgb(217, 217, 217);
+            }
+
+            closeButton.FlatAppearance.MouseOverBackColor = Color.FromArgb(232, 17, 35);
+            closeButton.FlatAppearance.MouseDownBackColor = Color.FromArgb(200, 0, 18);
+            closeButton.MouseEnter += (_, _) => closeButton.ForeColor = Color.White;
+            closeButton.MouseLeave += (_, _) => closeButton.ForeColor = Color.FromArgb(31, 41, 55);
+
+            minimizeButton.Click += (_, _) => WindowState = FormWindowState.Minimized;
+            maximizeButton.Click += (_, _) => ToggleWindowState(maximizeButton);
+            closeButton.Click += (_, _) => Close();
+
+            topBar.DoubleClick += (_, _) => ToggleWindowState(maximizeButton);
+            topTitle.DoubleClick += (_, _) => ToggleWindowState(maximizeButton);
+
+            windowButtonPanel.Controls.Add(minimizeButton);
+            windowButtonPanel.Controls.Add(maximizeButton);
+            windowButtonPanel.Controls.Add(closeButton);
+
             topBar.Controls.Add(topTitle);
+            topBar.Controls.Add(windowButtonPanel);
             SetActiveNav(navServerButton, "监控中心");
 
             var contentHost = new Panel
@@ -571,15 +852,50 @@ namespace NetworkMonitor
                 BackColor = Color.FromArgb(255, 255, 255)
             };
 
-            statusLabel = new Label
+            var statusHost = new Panel
             {
-                Text = "状态: 未启动",
                 Dock = DockStyle.Top,
-                Height = 28,
-                Font = new Font("微软雅黑", 10),
-                ForeColor = Color.FromArgb(75, 85, 99),
+                Height = 40,
                 BackColor = Color.FromArgb(255, 255, 255)
             };
+
+            statusTagPanel = new RoundedSurfacePanel
+            {
+                Location = new Point(0, 2),
+                Size = new Size(112, 36),
+                CornerRadius = 18,
+                BackColor = Color.FromArgb(253, 250, 250),
+                BorderColor = StatusTagBorderColor,
+                BorderWidth = 1
+            };
+
+            statusTagDot = new Label
+            {
+                Text = "●",
+                Location = new Point(16, 8),
+                Size = new Size(12, 20),
+                Font = new Font("Segoe UI Symbol", 10F, FontStyle.Regular),
+                ForeColor = StatusTagPendingColor,
+                BackColor = Color.Transparent,
+                TextAlign = ContentAlignment.MiddleCenter
+            };
+
+            statusTagLabel = new Label
+            {
+                Text = "正在尝试..",
+                Location = new Point(38, 8),
+                Size = new Size(70, 20),
+                Font = new Font("微软雅黑", 9.75F, FontStyle.Regular),
+                ForeColor = StatusTagTextColor,
+                BackColor = Color.Transparent,
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+
+            statusTagPanel.Controls.Add(statusTagDot);
+            statusTagPanel.Controls.Add(statusTagLabel);
+            statusHost.Controls.Add(statusTagPanel);
+
+            SetStatusBadge("未启动", UiTheme.TextSecondary);
 
             lastDisconnectLabel = new Label
             {
@@ -647,8 +963,8 @@ namespace NetworkMonitor
             {
                 Text = "启动监控",
                 Size = new Size(110, 34),
-                BackColor = UiTheme.PrimaryGreen,
-                ForeColor = UiTheme.TextPrimary,
+                BackColor = Color.FromArgb(255, 255, 255),
+                ForeColor = Color.Black,
                 BorderRadius = 6
             };
             startButton.Click += StartButton_Click;
@@ -658,8 +974,8 @@ namespace NetworkMonitor
                 Text = "停止监控",
                 Size = new Size(110, 34),
                 Enabled = false,
-                BackColor = UiTheme.Error,
-                ForeColor = UiTheme.TextPrimary,
+                BackColor = Color.FromArgb(255, 255, 255),
+                ForeColor = Color.Black,
                 BorderRadius = 6
             };
             stopButton.Click += StopButton_Click;
@@ -668,8 +984,8 @@ namespace NetworkMonitor
             {
                 Text = "测试访问",
                 Size = new Size(110, 34),
-                BackColor = UiTheme.Info,
-                ForeColor = UiTheme.TextPrimary,
+                BackColor = Color.FromArgb(255, 255, 255),
+                ForeColor = Color.Black,
                 BorderRadius = 6
             };
             testButton.Click += TestButton_Click;
@@ -678,8 +994,8 @@ namespace NetworkMonitor
             {
                 Text = "测试登录",
                 Size = new Size(110, 34),
-                BackColor = UiTheme.DeepGreen,
-                ForeColor = UiTheme.TextPrimary,
+                BackColor = Color.FromArgb(255, 255, 255),
+                ForeColor = Color.Black,
                 BorderRadius = 6
             };
             loginTestButton.Click += LoginTestButton_Click;
@@ -688,8 +1004,8 @@ namespace NetworkMonitor
             {
                 Text = "系统网络状态",
                 Size = new Size(130, 34),
-                BackColor = UiTheme.BgDark,
-                ForeColor = UiTheme.TextPrimary,
+                BackColor = Color.FromArgb(255, 255, 255),
+                ForeColor = Color.Black,
                 BorderRadius = 6
             };
             systemStatusButton.Click += SystemStatusButton_Click;
@@ -698,8 +1014,8 @@ namespace NetworkMonitor
             {
                 Text = "检测异常进程",
                 Size = new Size(130, 34),
-                BackColor = UiTheme.Warning,
-                ForeColor = UiTheme.TextPrimary,
+                BackColor = Color.FromArgb(255, 255, 255),
+                ForeColor = Color.Black,
                 BorderRadius = 6
             };
             abnormalProcessButton.Click += AbnormalProcessButton_Click;
@@ -740,7 +1056,7 @@ namespace NetworkMonitor
             cardPanel.Controls.Add(actionPanel);
             cardPanel.Controls.Add(lastLoginAttemptLabel);
             cardPanel.Controls.Add(lastDisconnectLabel);
-            cardPanel.Controls.Add(statusLabel);
+            cardPanel.Controls.Add(statusHost);
             cardPanel.Controls.Add(cardTitle);
 
             contentHost.Controls.Add(cardPanel);
@@ -750,6 +1066,13 @@ namespace NetworkMonitor
             rootPanel.Controls.Add(rightPanel);
             rootPanel.Controls.Add(sideBar);
             this.Controls.Add(rootPanel);
+
+            EnableWindowDrag(topBar);
+            EnableWindowDrag(topTitle);
+            EnableWindowDrag(sideHeader);
+            EnableWindowDrag(sideHeaderContent);
+            EnableWindowDrag(sideHeaderIcon);
+            EnableWindowDrag(sideHeaderText);
 
             // 初始化定时器（保留以便向后兼容）
             networkCheckTimer = new System.Windows.Forms.Timer();
@@ -960,7 +1283,7 @@ namespace NetworkMonitor
 
         private void MainForm_FormClosing(object? sender, FormClosingEventArgs e)
         {
-            if (e.CloseReason == CloseReason.UserClosing)
+            if (e.CloseReason == CloseReason.UserClosing && closeToTrayOnClose)
             {
                 e.Cancel = true;
                 this.Hide();
@@ -1005,8 +1328,7 @@ namespace NetworkMonitor
             stopButton.Enabled = true;
             intervalInput.Enabled = false;
 
-            statusLabel.Text = "状态: 监控中...";
-            statusLabel.ForeColor = UiTheme.PrimaryGreen;
+            SetStatusBadge("运行中", UiTheme.PrimaryGreen);
             
             AddLog("监控已自动启动，检查间隔: " + intervalInput.Value + "秒");
             
@@ -1022,8 +1344,7 @@ namespace NetworkMonitor
             else
             {
                 AddLog("当前不在监测时间段内，等待进入时间段");
-                statusLabel.Text = "状态: 监控中(时间段外)";
-                statusLabel.ForeColor = UiTheme.TextSecondary;
+                SetStatusBadge("时间段外", UiTheme.TextSecondary);
             }
             
             // 启动后台监控任务
@@ -1038,8 +1359,7 @@ namespace NetworkMonitor
             stopButton.Enabled = true;
             intervalInput.Enabled = false;
 
-            statusLabel.Text = "状态: 监控中...";
-            statusLabel.ForeColor = UiTheme.PrimaryGreen;
+            SetStatusBadge("运行中", UiTheme.PrimaryGreen);
             
             AddLog("监控已启动，检查间隔: " + intervalInput.Value + "秒");
             
@@ -1055,8 +1375,7 @@ namespace NetworkMonitor
             else
             {
                 AddLog("当前不在监测时间段内，等待进入时间段");
-                statusLabel.Text = "状态: 监控中(时间段外)";
-                statusLabel.ForeColor = UiTheme.TextSecondary;
+                SetStatusBadge("时间段外", UiTheme.TextSecondary);
             }
             
             // 启动后台监控任务
@@ -1114,8 +1433,7 @@ namespace NetworkMonitor
             networkCheckTimer.Stop();
             timeRangeCheckTimer?.Stop();
 
-            statusLabel.Text = "状态: 已停止";
-            statusLabel.ForeColor = UiTheme.TextSecondary;
+            SetStatusBadge("已停止", UiTheme.TextSecondary);
             
             AddLog("监控已停止");
         }
@@ -1133,6 +1451,7 @@ namespace NetworkMonitor
                 ShowNotification = showNotification,
                 ShowTrayNotification = showTrayNotification,
                 ShowRecoveryNotification = showRecoveryNotification,
+                CloseToTrayOnClose = closeToTrayOnClose,
                 AutoStart = autoStart,
                 AutoStartMonitoring = autoStartMonitoring,
                 LastMonitoringEnabled = isMonitoring,
@@ -1168,6 +1487,7 @@ namespace NetworkMonitor
             showNotification = settingsForm.ShowNotification;
             showTrayNotification = settingsForm.ShowTrayNotification;
             showRecoveryNotification = settingsForm.ShowRecoveryNotification;
+            closeToTrayOnClose = settingsForm.CloseToTrayOnClose;
             autoStart = settingsForm.AutoStart;
             autoStartMonitoring = settingsForm.AutoStartMonitoring;
             saveTestResult = settingsForm.SaveTestResult;
@@ -1315,14 +1635,12 @@ namespace NetworkMonitor
                     if (isAuthenticated)
                     {
                         AddLog("已连接校园网 - 认证成功");
-                        statusLabel.Text = "状态: 已连接校园网";
-                        statusLabel.ForeColor = UiTheme.PrimaryGreen;
+                        SetStatusBadge("已连接校园网", UiTheme.PrimaryGreen);
                     }
                     else
                     {
                         AddLog("未连接校园网 - 需要认证");
-                        statusLabel.Text = "状态: 未认证";
-                        statusLabel.ForeColor = UiTheme.Warning;
+                        SetStatusBadge("未认证", UiTheme.Warning);
                     }
 
                     AddLog($"测试完成 - 状态码: {(int)response.StatusCode} {response.StatusCode}");
@@ -1398,7 +1716,7 @@ namespace NetworkMonitor
                     {
                         if (enableAllDayDetection)
                         {
-                            if (statusLabel.Text == "状态: 监控中(时间段外)")
+                            if (currentStatusText == "时间段外")
                             {
                                 AddLog($"时间段外全天检测中，间隔: {allDayDetectionInterval}秒");
                             }
@@ -1408,18 +1726,17 @@ namespace NetworkMonitor
                         }
 
                         // 如果之前在时间段内，现在离开了
-                        if (statusLabel.Text != "状态: 监控中(时间段外)")
+                        if (currentStatusText != "时间段外")
                         {
                             AddLog("离开监测时间段，暂停网络检测");
-                            statusLabel.BeginInvoke(new Action(() => 
+                            BeginInvoke(new Action(() =>
                             {
-                                statusLabel.Text = "状态: 监控中(时间段外)";
-                                statusLabel.ForeColor = UiTheme.TextSecondary;
+                                SetStatusBadge("时间段外", UiTheme.TextSecondary);
                             }));
                         }
                         continue;
                     }
-                    else if (enableMonitorTimeRange && statusLabel.Text == "状态: 监控中(时间段外)")
+                    else if (enableMonitorTimeRange && currentStatusText == "时间段外")
                     {
                         // 刚进入时间段
                         AddLog("进入监测时间段，恢复网络检测");
@@ -1447,10 +1764,9 @@ namespace NetworkMonitor
 
             if (isConnected)
             {
-                statusLabel.BeginInvoke(new Action(() => 
+                BeginInvoke(new Action(() => 
                 {
-                    statusLabel.Text = "状态: 网络正常";
-                    statusLabel.ForeColor = UiTheme.PrimaryGreen;
+                    SetStatusBadge("网络正常", UiTheme.PrimaryGreen);
                 }));
                 notifyIcon.Icon = appIcon;
                 notifyIcon.Text = "网络监控工具 - 网络正常";
@@ -1468,10 +1784,9 @@ namespace NetworkMonitor
             }
             else
             {
-                statusLabel.BeginInvoke(new Action(() => 
+                BeginInvoke(new Action(() => 
                 {
-                    statusLabel.Text = "状态: 网络断开!";
-                    statusLabel.ForeColor = UiTheme.Error;
+                    SetStatusBadge("网络断开", UiTheme.Error);
                 }));
                 notifyIcon.Icon = appIcon;
                 notifyIcon.Text = "网络监控工具 - 网络断开";
@@ -1877,10 +2192,9 @@ namespace NetworkMonitor
             var result = await networkConnectionService.CheckConnectionAsync(options);
             if (result.GatewayUnreachable)
             {
-                statusLabel.BeginInvoke(new Action(() =>
+                BeginInvoke(new Action(() =>
                 {
-                    statusLabel.Text = "状态: 网络故障";
-                    statusLabel.ForeColor = UiTheme.Error;
+                    SetStatusBadge("网络故障", UiTheme.Error);
                 }));
             }
 

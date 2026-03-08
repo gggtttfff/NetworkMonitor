@@ -111,9 +111,28 @@ namespace NetworkMonitor
         private Color _normalBackColor;
         private Color _normalForeColor;
         private Color _hoverBackColor;
-        private Color _disabledBackColor = Color.FromArgb(229, 231, 235);
-        private Color _disabledForeColor = Color.FromArgb(156, 163, 175);
+        private Color _disabledBackColor = Color.FromArgb(224, 224, 224);
+        private Color _disabledForeColor = Color.FromArgb(160, 160, 160);
+        private readonly Color _defaultBorderColor = Color.FromArgb(229, 229, 229);
+        private readonly Color _activeBorderColor = Color.Black;
         private bool _isHovered = false;
+        private bool _isPressed = false;
+        private bool _showBorder = true;
+
+        /// <summary>
+        /// 是否显示边框
+        /// </summary>
+        [Browsable(true)]
+        [DesignerSerializationVisibility(DesignerSerializationVisibility.Visible)]
+        public bool ShowBorder
+        {
+            get => _showBorder;
+            set
+            {
+                _showBorder = value;
+                Invalidate();
+            }
+        }
 
         /// <summary>
         /// 圆角半径
@@ -173,15 +192,17 @@ namespace NetworkMonitor
 
         public RoundedButton()
         {
+            SetStyle(ControlStyles.SupportsTransparentBackColor, true);
             FlatStyle = FlatStyle.Flat;
-            BackColor = UiTheme.PrimaryGreen;
-            ForeColor = UiTheme.TextPrimary;
+            BackColor = Color.FromArgb(255, 255, 255);
+            ForeColor = Color.Black;
             _normalBackColor = BackColor;
             _normalForeColor = ForeColor;
-            _hoverBackColor = ControlPaint.Light(_normalBackColor, 0.1f);
+            _hoverBackColor = Color.FromArgb(248, 248, 248);
 
             FlatAppearance.BorderSize = 0;
             DoubleBuffered = true;
+            TabStop = true;
         }
 
         protected override void OnCreateControl()
@@ -189,7 +210,7 @@ namespace NetworkMonitor
             base.OnCreateControl();
             _normalBackColor = BackColor;
             _normalForeColor = ForeColor;
-            _hoverBackColor = ControlPaint.Light(_normalBackColor, 0.1f);
+            _hoverBackColor = Color.FromArgb(248, 248, 248);
         }
 
         protected override void OnMouseEnter(EventArgs e)
@@ -212,15 +233,63 @@ namespace NetworkMonitor
             Invalidate();
         }
 
+        protected override void OnMouseDown(MouseEventArgs mevent)
+        {
+            base.OnMouseDown(mevent);
+            if (mevent.Button == MouseButtons.Left)
+            {
+                _isPressed = true;
+                Invalidate();
+            }
+        }
+
+        protected override void OnMouseUp(MouseEventArgs mevent)
+        {
+            base.OnMouseUp(mevent);
+            if (_isPressed)
+            {
+                _isPressed = false;
+                Invalidate();
+            }
+        }
+
+        protected override void OnGotFocus(EventArgs e)
+        {
+            base.OnGotFocus(e);
+            Invalidate();
+        }
+
+        protected override void OnLostFocus(EventArgs e)
+        {
+            base.OnLostFocus(e);
+            _isPressed = false;
+            Invalidate();
+        }
+
         protected override void OnPaint(PaintEventArgs pevent)
         {
+            if (ClientRectangle.Width <= 1 || ClientRectangle.Height <= 1)
+            {
+                return;
+            }
+
             pevent.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            pevent.Graphics.PixelOffsetMode = PixelOffsetMode.Half;
 
             // 清除背景
             pevent.Graphics.Clear(Parent?.BackColor ?? SystemColors.Control);
 
+            // 内缩1像素，避免右侧和底部边框被裁切
+            Rectangle renderRect = new Rectangle(
+                ClientRectangle.X,
+                ClientRectangle.Y,
+                ClientRectangle.Width - 1,
+                ClientRectangle.Height - 1);
+
+            int safeRadius = Math.Min(_borderRadius, Math.Min(renderRect.Width, renderRect.Height) / 2);
+
             // 创建圆角路径
-            using (GraphicsPath path = GetRoundedPath(ClientRectangle, _borderRadius))
+            using (GraphicsPath path = GetRoundedPath(renderRect, safeRadius))
             {
                 // 确定当前颜色
                 Color currentBackColor = Enabled
@@ -235,16 +304,86 @@ namespace NetworkMonitor
                     pevent.Graphics.FillPath(brush, path);
                 }
 
-                // 绘制文字
+                // 边缘阴影/边框
+                if (_showBorder)
+                {
+                    bool isSelected = Focused || _isPressed;
+                    using (Pen borderPen = new Pen(isSelected ? _activeBorderColor : _defaultBorderColor, 1f))
+                    {
+                        pevent.Graphics.DrawPath(borderPen, path);
+                    }
+                }
+
+                Rectangle contentRect = Rectangle.FromLTRB(
+                    renderRect.Left + Padding.Left,
+                    renderRect.Top + Padding.Top,
+                    renderRect.Right - Padding.Right,
+                    renderRect.Bottom - Padding.Bottom);
+
+                if (Image != null)
+                {
+                    const int imageSize = 18;
+                    const int imageSpacing = 10;
+                    int imageX = contentRect.Left;
+                    int imageY = contentRect.Top + Math.Max(0, (contentRect.Height - imageSize) / 2);
+                    var imageRect = new Rectangle(imageX, imageY, imageSize, imageSize);
+                    pevent.Graphics.DrawImage(Image, imageRect);
+
+                    contentRect = Rectangle.FromLTRB(
+                        imageRect.Right + imageSpacing,
+                        contentRect.Top,
+                        contentRect.Right,
+                        contentRect.Bottom);
+                }
+
                 TextRenderer.DrawText(
                     pevent.Graphics,
                     Text,
                     Font,
-                    ClientRectangle,
+                    contentRect,
                     currentForeColor,
-                    TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter
+                    GetTextFormatFlags(TextAlign)
                 );
             }
+        }
+
+        private static TextFormatFlags GetTextFormatFlags(ContentAlignment alignment)
+        {
+            TextFormatFlags flags = TextFormatFlags.EndEllipsis | TextFormatFlags.SingleLine;
+
+            switch (alignment)
+            {
+                case ContentAlignment.TopLeft:
+                    flags |= TextFormatFlags.Left | TextFormatFlags.Top;
+                    break;
+                case ContentAlignment.TopCenter:
+                    flags |= TextFormatFlags.HorizontalCenter | TextFormatFlags.Top;
+                    break;
+                case ContentAlignment.TopRight:
+                    flags |= TextFormatFlags.Right | TextFormatFlags.Top;
+                    break;
+                case ContentAlignment.MiddleLeft:
+                    flags |= TextFormatFlags.Left | TextFormatFlags.VerticalCenter;
+                    break;
+                case ContentAlignment.MiddleRight:
+                    flags |= TextFormatFlags.Right | TextFormatFlags.VerticalCenter;
+                    break;
+                case ContentAlignment.BottomLeft:
+                    flags |= TextFormatFlags.Left | TextFormatFlags.Bottom;
+                    break;
+                case ContentAlignment.BottomCenter:
+                    flags |= TextFormatFlags.HorizontalCenter | TextFormatFlags.Bottom;
+                    break;
+                case ContentAlignment.BottomRight:
+                    flags |= TextFormatFlags.Right | TextFormatFlags.Bottom;
+                    break;
+                case ContentAlignment.MiddleCenter:
+                default:
+                    flags |= TextFormatFlags.HorizontalCenter | TextFormatFlags.VerticalCenter;
+                    break;
+            }
+
+            return flags;
         }
 
         private GraphicsPath GetRoundedPath(Rectangle rect, int radius)
@@ -276,7 +415,7 @@ namespace NetworkMonitor
         {
             _normalBackColor = backColor;
             _normalForeColor = foreColor;
-            _hoverBackColor = ControlPaint.Light(backColor, 0.1f);
+            _hoverBackColor = Color.FromArgb(248, 248, 248);
             BackColor = backColor;
             ForeColor = foreColor;
             Invalidate();

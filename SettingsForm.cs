@@ -16,6 +16,7 @@ namespace NetworkMonitor
         private CheckBox showNotificationCheckBox = null!;
         private CheckBox showTrayNotificationCheckBox = null!;
         private CheckBox showRecoveryNotificationCheckBox = null!;
+        private ComboBox closeBehaviorComboBox = null!;
         private CheckBox autoStartCheckBox = null!;
         private CheckBox autoStartMonitoringCheckBox = null!;
         private CheckBox saveTestResultCheckBox = null!;
@@ -39,6 +40,8 @@ namespace NetworkMonitor
         private Button testLoginButton = null!;
         private Label loginTestStatusLabel = null!;
         private bool loginTestPassed = false;
+        private string initialUsername = string.Empty;
+        private string initialPassword = string.Empty;
         private Button saveButton = null!;
         private Button cancelButton = null!;
 
@@ -51,6 +54,7 @@ namespace NetworkMonitor
         public bool ShowNotification { get; private set; } = true;
         public bool ShowTrayNotification { get; private set; } = true;
         public bool ShowRecoveryNotification { get; private set; } = true;
+        public bool CloseToTrayOnClose { get; private set; } = true;
         public bool AutoStart { get; private set; } = false;
         public bool AutoStartMonitoring { get; private set; } = false;
         public bool SaveTestResult { get; private set; } = false;
@@ -93,6 +97,7 @@ namespace NetworkMonitor
             ShowNotification = settings.ShowNotification;
             ShowTrayNotification = settings.ShowTrayNotification;
             ShowRecoveryNotification = settings.ShowRecoveryNotification;
+            CloseToTrayOnClose = settings.CloseToTrayOnClose;
             AutoStart = StartupServiceManager.IsInstalled();
             AutoStartMonitoring = settings.AutoStartMonitoring;
             SaveTestResult = settings.SaveTestResult;
@@ -130,6 +135,7 @@ namespace NetworkMonitor
             showNotificationCheckBox.Checked = ShowNotification;
             showTrayNotificationCheckBox.Checked = ShowTrayNotification;
             showRecoveryNotificationCheckBox.Checked = ShowRecoveryNotification;
+            closeBehaviorComboBox.SelectedIndex = CloseToTrayOnClose ? 0 : 1;
             autoStartCheckBox.Checked = AutoStart;
             autoStartMonitoringCheckBox.Checked = AutoStartMonitoring;
             saveTestResultCheckBox.Checked = SaveTestResult;
@@ -155,7 +161,7 @@ namespace NetworkMonitor
             
             retryCountInput.Value = LoginRetryCount;
             retryDelayInput.Value = LoginRetryDelay;
-            MarkLoginTestPending("未测试");
+            ResetCredentialBaseline();
             RefreshServiceStatus();
         }
 
@@ -321,6 +327,26 @@ namespace NetworkMonitor
                 Checked = true
             };
 
+            var closeBehaviorLabel = new Label
+            {
+                Text = "点击关闭按钮时:",
+                Location = new Point(20, 430),
+                Size = new Size(120, 25)
+            };
+
+            closeBehaviorComboBox = new ComboBox
+            {
+                Location = new Point(150, 430),
+                Size = new Size(260, 25),
+                DropDownStyle = ComboBoxStyle.DropDownList
+            };
+            closeBehaviorComboBox.Items.AddRange(new object[]
+            {
+                "最小化到后台运行",
+                "直接退出程序"
+            });
+            closeBehaviorComboBox.SelectedIndex = 0;
+
             autoStartCheckBox = new CheckBox
             {
                 Text = "开机自启动程序（服务）",
@@ -332,7 +358,7 @@ namespace NetworkMonitor
             autoStartMonitoringCheckBox = new CheckBox
             {
                 Text = "打开程序自动开启监控",
-                Location = new Point(20, 455),
+                Location = new Point(20, 485),
                 Size = new Size(380, 25),
                 Checked = false
             };
@@ -704,6 +730,8 @@ namespace NetworkMonitor
             basicTab.Controls.Add(showNotificationCheckBox);
             basicTab.Controls.Add(showTrayNotificationCheckBox);
             basicTab.Controls.Add(showRecoveryNotificationCheckBox);
+            basicTab.Controls.Add(closeBehaviorLabel);
+            basicTab.Controls.Add(closeBehaviorComboBox);
             basicTab.Controls.Add(autoStartMonitoringCheckBox);
 
             policyTab.Controls.Add(enableTimeRangeCheckBox);
@@ -775,13 +803,12 @@ namespace NetworkMonitor
             this.Controls.Add(saveButton);
             this.Controls.Add(cancelButton);
 
-            loginUrlTextBox.TextChanged += (_, _) => MarkLoginTestPending("配置已更改，请重新测试");
-            usernameTextBox.TextChanged += (_, _) => MarkLoginTestPending("配置已更改，请重新测试");
-            passwordTextBox.TextChanged += (_, _) => MarkLoginTestPending("配置已更改，请重新测试");
+            usernameTextBox.TextChanged += (_, _) => HandleCredentialChanged();
+            passwordTextBox.TextChanged += (_, _) => HandleCredentialChanged();
 
             this.AcceptButton = saveButton;
             this.CancelButton = cancelButton;
-            MarkLoginTestPending("未测试");
+            ResetCredentialBaseline();
             RefreshServiceStatus();
         }
 
@@ -820,9 +847,9 @@ namespace NetworkMonitor
                 return;
             }
 
-            if (!loginTestPassed)
+            if (IsCredentialChanged() && !loginTestPassed)
             {
-                MessageBox.Show("请先点击“测试登录”并通过后再保存设置", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show("账号或密码已修改，请先点击“测试登录”并通过后再保存设置", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
@@ -835,6 +862,7 @@ namespace NetworkMonitor
             ShowNotification = showNotificationCheckBox.Checked;
             ShowTrayNotification = showTrayNotificationCheckBox.Checked;
             ShowRecoveryNotification = showRecoveryNotificationCheckBox.Checked;
+            CloseToTrayOnClose = closeBehaviorComboBox.SelectedIndex != 1;
             AutoStart = autoStartCheckBox.Checked;
             AutoStartMonitoring = autoStartMonitoringCheckBox.Checked;
             SaveTestResult = saveTestResultCheckBox.Checked;
@@ -906,13 +934,56 @@ namespace NetworkMonitor
             }
         }
 
+        private bool IsCredentialChanged()
+        {
+            if (usernameTextBox == null || passwordTextBox == null)
+            {
+                return false;
+            }
+
+            return !string.Equals(usernameTextBox.Text.Trim(), initialUsername, StringComparison.Ordinal)
+                || !string.Equals(passwordTextBox.Text, initialPassword, StringComparison.Ordinal);
+        }
+
+        private void UpdateSaveButtonState()
+        {
+            if (saveButton == null)
+            {
+                return;
+            }
+
+            saveButton.Enabled = !IsCredentialChanged() || loginTestPassed;
+        }
+
+        private void HandleCredentialChanged()
+        {
+            if (IsCredentialChanged())
+            {
+                MarkLoginTestPending("账号或密码已更改，请重新测试");
+                return;
+            }
+
+            loginTestPassed = false;
+            UpdateSaveButtonState();
+            if (loginTestStatusLabel != null)
+            {
+                loginTestStatusLabel.Text = "登录测试: 账号和密码未变更，可直接保存";
+                loginTestStatusLabel.ForeColor = Color.DimGray;
+            }
+        }
+
+        private void ResetCredentialBaseline()
+        {
+            initialUsername = usernameTextBox?.Text.Trim() ?? string.Empty;
+            initialPassword = passwordTextBox?.Text ?? string.Empty;
+            loginTestPassed = false;
+            HandleCredentialChanged();
+        }
+
         private void MarkLoginTestPending(string reason)
         {
             loginTestPassed = false;
-            if (saveButton != null)
-            {
-                saveButton.Enabled = false;
-            }
+            UpdateSaveButtonState();
             if (loginTestStatusLabel != null)
             {
                 loginTestStatusLabel.Text = $"登录测试: {reason}";
@@ -923,10 +994,7 @@ namespace NetworkMonitor
         private void MarkLoginTestPassed()
         {
             loginTestPassed = true;
-            if (saveButton != null)
-            {
-                saveButton.Enabled = true;
-            }
+            UpdateSaveButtonState();
             if (loginTestStatusLabel != null)
             {
                 loginTestStatusLabel.Text = "登录测试: 已通过";

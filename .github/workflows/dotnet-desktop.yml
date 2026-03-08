@@ -1,84 +1,107 @@
-# 网络监控工具 CI/CD 工作流
-# 作用：
-# 1. 每次推送代码时自动编译项目
-# 2. 创建发布版本时自动打包 exe 文件
-# 3. 上传构建产物到 GitHub Actions
-
-name: .NET Desktop
+name: .NET Desktop CI/CD
 
 on:
-  # 推送到 master 分支时触发
   push:
-    branches: [ "master" ]
-  # 创建 Pull Request 时触发
+    branches:
+      - master
+    tags:
+      - "v*"
   pull_request:
-    branches: [ "master" ]
-  # 手动触发
+    branches:
+      - master
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  DOTNET_VERSION: "9.0.x"
+  BUILD_CONFIGURATION: Release
+  RUNTIME_ID: win-x64
+  PUBLISH_DIR: out/publish/win-x64
+  INSTALLER_DIR: out/installer
 
 jobs:
   build:
+    name: Build And Publish
     runs-on: windows-latest
 
     steps:
-    # 检出代码
-    - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    # 安装 .NET 9 SDK
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: '9.0.x'
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
 
-    # 还原 NuGet 包
-    - name: Restore dependencies
-      run: dotnet restore
+      - name: Restore
+        run: dotnet restore .\NetworkMonitor.csproj
 
-    # 编译项目
-    - name: Build
-      run: dotnet build --no-restore --configuration Release
+      - name: Build
+        run: dotnet build .\NetworkMonitor.csproj --configuration $env:BUILD_CONFIGURATION --no-restore
 
-    # 发布单文件 exe
-    - name: Publish
-      run: dotnet publish --no-build --configuration Release --output ./publish
+      - name: Publish
+        run: dotnet publish .\NetworkMonitor.csproj --configuration $env:BUILD_CONFIGURATION --runtime $env:RUNTIME_ID --self-contained true -p:PublishSingleFile=true --no-build -o $env:PUBLISH_DIR
 
-    # 上传构建产物
-    - name: Upload artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: NetworkMonitor
-        path: ./publish/*.exe
+      - name: Upload Publish Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetworkMonitor-publish-${{ env.RUNTIME_ID }}
+          path: ${{ env.PUBLISH_DIR }}
+          if-no-files-found: error
 
-  # 打标签时创建发布
   release:
-    needs: build
+    name: Package And Release
     runs-on: windows-latest
-    # 只有打标签时才执行
+    needs: build
     if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
 
     steps:
-    - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-    - name: Setup .NET
-      uses: actions/setup-dotnet@v4
-      with:
-        dotnet-version: '9.0.x'
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
 
-    - name: Restore dependencies
-      run: dotnet restore
+      - name: Install Inno Setup
+        run: winget install JRSoftware.InnoSetup -e --accept-package-agreements --accept-source-agreements
 
-    - name: Publish
-      run: dotnet publish --configuration Release --output ./publish
+      - name: Resolve Inno Setup Compiler
+        id: iscc
+        shell: pwsh
+        run: |
+          $paths = @(
+            "$Env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe",
+            "$Env:ProgramFiles\Inno Setup 6\ISCC.exe"
+          )
+          $compiler = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $compiler) {
+            throw "ISCC.exe was not found after installing Inno Setup."
+          }
+          "path=$compiler" | Out-File -FilePath $Env:GITHUB_OUTPUT -Encoding utf8 -Append
 
-    # 打包成 zip
-    - name: Zip artifact
-      run: Compress-Archive -Path ./publish/* -DestinationPath NetworkMonitor.zip
+      - name: Build Installer
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          .\build-installer.ps1 -Version $version -Configuration $Env:BUILD_CONFIGURATION -Runtime $Env:RUNTIME_ID -InnoSetupCompiler "${{ steps.iscc.outputs.path }}"
 
-    # 创建 GitHub Release
-    - name: Create Release
-      uses: softprops/action-gh-release@v1
-      with:
-        files: NetworkMonitor.zip
-        generate_release_notes: true
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Archive Publish Output
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          $zipPath = Join-Path $PWD "NetworkMonitor-$version-${Env:RUNTIME_ID}.zip"
+          Compress-Archive -Path "$Env:PUBLISH_DIR\*" -DestinationPath $zipPath -Force
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            ${{ env.INSTALLER_DIR }}\NetworkMonitor-Setup-*.exe
+            NetworkMonitor-*.zip
