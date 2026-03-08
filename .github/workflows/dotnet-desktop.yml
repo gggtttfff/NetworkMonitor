@@ -169,10 +169,17 @@ jobs:
           $zipPath = Join-Path $PWD "NetworkMonitor-$version-${Env:RUNTIME_ID}.zip"
           Compress-Archive -Path "$Env:PUBLISH_DIR\*" -DestinationPath $zipPath -Force
 
+      - name: Upload Installer Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: NetworkMonitor-installer-${{ steps.app_version.outputs.value }}
+          path: ${{ env.INSTALLER_DIR }}/NetworkMonitor-Setup-*.exe
+          if-no-files-found: error
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           generate_release_notes: true
           files: |
-            ${{ env.INSTALLER_DIR }}\NetworkMonitor-Setup-*.exe
+            ${{ env.INSTALLER_DIR }}/NetworkMonitor-Setup-*.exe
             NetworkMonitor-*.zip
