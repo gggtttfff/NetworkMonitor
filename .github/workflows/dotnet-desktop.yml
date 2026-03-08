@@ -72,18 +72,47 @@ jobs:
         shell: pwsh
         run: choco install innosetup --yes --no-progress
 
+      - name: Debug Inno Setup Paths
+        shell: pwsh
+        run: |
+          Write-Host "ChocolateyInstall=$Env:ChocolateyInstall"
+          Write-Host "ProgramData=$Env:ProgramData"
+          $debugRoots = @(
+            "$Env:ChocolateyInstall",
+            "$Env:ProgramData\chocolatey",
+            "$Env:ProgramFiles(x86)",
+            "$Env:ProgramFiles",
+            "$Env:LOCALAPPDATA\Programs"
+          )
+          foreach ($root in $debugRoots) {
+            if (Test-Path $root) {
+              Write-Host "Searching: $root"
+              Get-ChildItem -Path $root -Filter ISCC.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
+            }
+          }
+
       - name: Resolve Inno Setup Compiler
         id: iscc
         shell: pwsh
         run: |
           $paths = @(
+            "$Env:ChocolateyInstall\bin\ISCC.exe",
+            "$Env:ChocolateyInstall\lib\innosetup\tools\ISCC.exe",
+            "$Env:ProgramData\chocolatey\bin\ISCC.exe",
+            "$Env:ProgramData\chocolatey\lib\innosetup\tools\ISCC.exe",
             "$Env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe",
             "$Env:ProgramFiles\Inno Setup 6\ISCC.exe",
             "$Env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
           )
-          $compiler = $paths | Where-Object { Test-Path $_ } | Select-Object -First 1
+          $compiler = $paths | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
           if (-not $compiler) {
-            $searchRoots = @("$Env:ProgramFiles(x86)", "$Env:ProgramFiles", "$Env:LOCALAPPDATA\Programs")
+            $searchRoots = @(
+              "$Env:ChocolateyInstall",
+              "$Env:ProgramData\chocolatey",
+              "$Env:ProgramFiles(x86)",
+              "$Env:ProgramFiles",
+              "$Env:LOCALAPPDATA\Programs"
+            )
             foreach ($root in $searchRoots) {
               if (Test-Path $root) {
                 $compiler = Get-ChildItem -Path $root -Filter ISCC.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName -First 1
