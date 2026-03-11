@@ -89,8 +89,10 @@ namespace NetworkMonitor
         // 时间记录
         private DateTime? lastDisconnectTime = null;
         private DateTime? lastLoginAttemptTime = null;
+        private DateTime? lastAutoLoginSuccessTime = null;
         private Label lastDisconnectLabel = null!;
         private Label lastLoginAttemptLabel = null!;
+        private Label lastAutoLoginTimeLabel = null!;
         private string currentStatusText = string.Empty;
 
         // 引入Windows API调整系统音量
@@ -897,25 +899,58 @@ namespace NetworkMonitor
 
             SetStatusBadge("未启动", UiTheme.TextSecondary);
 
+            var statusInfoPanel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                Height = 48,
+                ColumnCount = 2,
+                RowCount = 2,
+                Margin = new Padding(0),
+                Padding = new Padding(0),
+                BackColor = Color.FromArgb(255, 255, 255)
+            };
+            statusInfoPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+            statusInfoPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50F));
+            statusInfoPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 24F));
+            statusInfoPanel.RowStyles.Add(new RowStyle(SizeType.Absolute, 24F));
+
             lastDisconnectLabel = new Label
             {
                 Text = "上次断开: 无",
-                Dock = DockStyle.Top,
-                Height = 24,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0),
                 Font = new Font("微软雅黑", 9),
                 ForeColor = Color.FromArgb(107, 114, 128),
-                BackColor = Color.FromArgb(255, 255, 255)
+                BackColor = Color.FromArgb(255, 255, 255),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+
+            lastAutoLoginTimeLabel = new Label
+            {
+                Text = "上次自动登录时间: 无",
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0),
+                Font = new Font("微软雅黑", 9),
+                ForeColor = Color.FromArgb(107, 114, 128),
+                BackColor = Color.FromArgb(255, 255, 255),
+                TextAlign = ContentAlignment.MiddleLeft
             };
 
             lastLoginAttemptLabel = new Label
             {
-                Text = "上次登录: 无",
-                Dock = DockStyle.Top,
-                Height = 24,
+                Text = "上次自动登录尝试: 无",
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0),
                 Font = new Font("微软雅黑", 9),
                 ForeColor = Color.FromArgb(107, 114, 128),
-                BackColor = Color.FromArgb(255, 255, 255)
+                BackColor = Color.FromArgb(255, 255, 255),
+                TextAlign = ContentAlignment.MiddleLeft
             };
+
+            statusInfoPanel.Controls.Add(lastDisconnectLabel, 0, 0);
+            statusInfoPanel.Controls.Add(lastAutoLoginTimeLabel, 1, 0);
+            statusInfoPanel.Controls.Add(lastLoginAttemptLabel, 0, 1);
+            statusInfoPanel.SetColumnSpan(lastLoginAttemptLabel, 2);
 
             var actionPanel = new FlowLayoutPanel
             {
@@ -1054,8 +1089,7 @@ namespace NetworkMonitor
             cardPanel.Controls.Add(logTextBox);
             cardPanel.Controls.Add(logLabel);
             cardPanel.Controls.Add(actionPanel);
-            cardPanel.Controls.Add(lastLoginAttemptLabel);
-            cardPanel.Controls.Add(lastDisconnectLabel);
+            cardPanel.Controls.Add(statusInfoPanel);
             cardPanel.Controls.Add(statusHost);
             cardPanel.Controls.Add(cardTitle);
 
@@ -1554,7 +1588,7 @@ namespace NetworkMonitor
                 // 保存设置到文件
                 SaveSettings();
                 MessageBox.Show("设置已保存", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                AddLog($"设置已更新: {loginUrl}, DNS: {primaryDns}/{secondaryDns}, 用户名: {username}, 重试{loginRetryCount}次");
+                AddLog($"设置已更新: {loginUrl}, 检测目标: {primaryDns}/{secondaryDns}, 用户名: {username}, 重试{loginRetryCount}次");
             }
         }
 
@@ -2155,16 +2189,16 @@ namespace NetworkMonitor
                 // 测试网络连通性
                 AddLog("\n===== 网络连通性测试 =====");
                 
-                // 检查是否可以解析DNS
+                // 检查是否可以解析测试域名
                 try
                 {
-                    AddLog("正在测试DNS解析...");
+                    AddLog("正在测试域名解析...");
                     IPAddress[] addresses = Dns.GetHostAddresses("www.baidu.com");
-                    AddLog($"DNS解析成功: www.baidu.com => {string.Join(", ", addresses.Select(a => a.ToString()))}");
+                    AddLog($"测试域名解析成功: www.baidu.com => {string.Join(", ", addresses.Select(a => a.ToString()))}");
                 }
                 catch (Exception ex)
                 {
-                    AddLog($"DNS解析失败: {ex.Message}");
+                    AddLog($"测试域名解析失败: {ex.Message}");
                 }
                 
                 // 检查Internet连接状态（使用Windows API）
@@ -2253,6 +2287,8 @@ namespace NetworkMonitor
 
                 if (result.Success)
                 {
+                    lastAutoLoginSuccessTime = DateTime.Now;
+                    UpdateTimeLabels();
                     if (showTrayNotification)
                     {
                         ShowBalloonTipWithSound(3000, "登录成功",
@@ -2293,14 +2329,23 @@ namespace NetworkMonitor
                 lastDisconnectLabel.Text = "上次断开: 无";
             }
             
-            // 更新登录时间
+            // 更新自动登录尝试时间
             if (lastLoginAttemptTime.HasValue)
             {
-                lastLoginAttemptLabel.Text = $"上次登录: {lastLoginAttemptTime.Value:HH:mm:ss}";
+                lastLoginAttemptLabel.Text = $"上次自动登录尝试: {lastLoginAttemptTime.Value:HH:mm:ss}";
             }
             else
             {
-                lastLoginAttemptLabel.Text = "上次登录: 无";
+                lastLoginAttemptLabel.Text = "上次自动登录尝试: 无";
+            }
+
+            if (lastAutoLoginSuccessTime.HasValue)
+            {
+                lastAutoLoginTimeLabel.Text = $"上次自动登录时间: {lastAutoLoginSuccessTime.Value:HH:mm:ss}";
+            }
+            else
+            {
+                lastAutoLoginTimeLabel.Text = "上次自动登录时间: 无";
             }
         }
 

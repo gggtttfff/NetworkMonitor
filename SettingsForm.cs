@@ -39,7 +39,6 @@ namespace NetworkMonitor
         private ComboBox? themeModeComboBox = null;
         private Button testLoginButton = null!;
         private Label loginTestStatusLabel = null!;
-        private bool loginTestPassed = false;
         private string initialUsername = string.Empty;
         private string initialPassword = string.Empty;
         private Button saveButton = null!;
@@ -191,10 +190,10 @@ namespace NetworkMonitor
                 Text = "http://2.2.2.2"
             };
 
-            // 主 DNS
+            // 主检测目标
             Label primaryDnsLabel = new Label
             {
-                Text = "主 DNS 服务器:",
+                Text = "主检测目标:",
                 Location = new Point(20, 60),
                 Size = new Size(120, 25)
             };
@@ -206,10 +205,10 @@ namespace NetworkMonitor
                 Text = "8.8.8.8"
             };
 
-            // 备用 DNS
+            // 备用检测目标
             Label secondaryDnsLabel = new Label
             {
-                Text = "备用 DNS 服务器:",
+                Text = "备用检测目标:",
                 Location = new Point(20, 100),
                 Size = new Size(120, 25)
             };
@@ -785,8 +784,7 @@ namespace NetworkMonitor
             {
                 Text = "保存",
                 Location = new Point(292, 505),
-                Size = new Size(90, 35),
-                DialogResult = DialogResult.OK
+                Size = new Size(90, 35)
             };
             saveButton.Click += SaveButton_Click;
 
@@ -821,16 +819,16 @@ namespace NetworkMonitor
                 return;
             }
 
-            // 验证 DNS 地址
+            // 验证检测目标
             if (string.IsNullOrWhiteSpace(primaryDnsTextBox.Text))
             {
-                MessageBox.Show("请输入主 DNS 服务器地址", "验证错误", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show("请输入主检测目标", "验证错误", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
             if (string.IsNullOrWhiteSpace(secondaryDnsTextBox.Text))
             {
-                MessageBox.Show("请输入备用 DNS 服务器地址", "验证错误", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show("请输入备用检测目标", "验证错误", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
             
@@ -844,12 +842,6 @@ namespace NetworkMonitor
             if (string.IsNullOrWhiteSpace(passwordTextBox.Text))
             {
                 MessageBox.Show("请输入校园网密码", "验证错误", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                return;
-            }
-
-            if (IsCredentialChanged() && !loginTestPassed)
-            {
-                MessageBox.Show("账号或密码已修改，请先点击“测试登录”并通过后再保存设置", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return;
             }
 
@@ -888,6 +880,8 @@ namespace NetworkMonitor
             
             LoginRetryCount = (int)retryCountInput.Value;
             LoginRetryDelay = (int)retryDelayInput.Value;
+            DialogResult = DialogResult.OK;
+            Close();
         }
 
         private async void TestLoginButton_Click(object? sender, EventArgs e)
@@ -919,13 +913,13 @@ namespace NetworkMonitor
                 }
                 else
                 {
-                    MarkLoginTestPending("失败，请检查配置");
+                    MarkLoginTestPending("失败，请检查配置，仍可直接保存");
                     MessageBox.Show($"登录测试失败: {result.Message}", "提示", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             }
             catch (Exception ex)
             {
-                MarkLoginTestPending("失败，请检查网络");
+                MarkLoginTestPending("失败，请检查网络，仍可直接保存");
                 MessageBox.Show($"登录测试异常: {ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             finally
@@ -952,18 +946,17 @@ namespace NetworkMonitor
                 return;
             }
 
-            saveButton.Enabled = !IsCredentialChanged() || loginTestPassed;
+            saveButton.Enabled = true;
         }
 
         private void HandleCredentialChanged()
         {
             if (IsCredentialChanged())
             {
-                MarkLoginTestPending("账号或密码已更改，请重新测试");
+                MarkLoginTestPending("账号或密码已更改，可直接保存，建议先测试");
                 return;
             }
 
-            loginTestPassed = false;
             UpdateSaveButtonState();
             if (loginTestStatusLabel != null)
             {
@@ -976,13 +969,11 @@ namespace NetworkMonitor
         {
             initialUsername = usernameTextBox?.Text.Trim() ?? string.Empty;
             initialPassword = passwordTextBox?.Text ?? string.Empty;
-            loginTestPassed = false;
             HandleCredentialChanged();
         }
 
         private void MarkLoginTestPending(string reason)
         {
-            loginTestPassed = false;
             UpdateSaveButtonState();
             if (loginTestStatusLabel != null)
             {
@@ -993,7 +984,6 @@ namespace NetworkMonitor
 
         private void MarkLoginTestPassed()
         {
-            loginTestPassed = true;
             UpdateSaveButtonState();
             if (loginTestStatusLabel != null)
             {
