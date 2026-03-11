@@ -29,6 +29,7 @@ namespace NetworkMonitor
         private readonly int _retentionDays;
         private StreamWriter? _currentWriter;
         private string _currentLogFilePath = "";
+        private string _currentLogDateKey = "";
         private readonly SemaphoreSlim _writeLock = new SemaphoreSlim(1, 1);
         private bool _disposed = false;
 
@@ -101,6 +102,7 @@ namespace NetworkMonitor
                 // 打开文件流（追加模式）
                 _currentWriter = new StreamWriter(_currentLogFilePath, append: true, Encoding.UTF8);
                 _currentWriter.AutoFlush = true;
+                _currentLogDateKey = dateStr;
 
                 // 写入启动标记
                 _currentWriter.WriteLine();
@@ -177,7 +179,26 @@ namespace NetworkMonitor
         {
             try
             {
-                if (_currentWriter != null && File.Exists(_currentLogFilePath))
+                if (_currentWriter == null)
+                {
+                    InitializeLogFile();
+                    return;
+                }
+
+                string todayKey = DateTime.Now.ToString("yyyyMMdd");
+                if (!string.Equals(_currentLogDateKey, todayKey, StringComparison.Ordinal))
+                {
+                    _currentWriter.WriteLine($"========== 日期已切换，轮转到新日志文件 {DateTime.Now:yyyy-MM-dd HH:mm:ss} ==========");
+                    _currentWriter.Close();
+                    _currentWriter.Dispose();
+                    _currentWriter = null;
+
+                    InitializeLogFile();
+                    CleanupOldLogs();
+                    return;
+                }
+
+                if (File.Exists(_currentLogFilePath))
                 {
                     var fileInfo = new FileInfo(_currentLogFilePath);
 
@@ -190,6 +211,7 @@ namespace NetworkMonitor
                         _currentWriter = null;
 
                         InitializeLogFile();
+                        CleanupOldLogs();
                     }
                 }
             }

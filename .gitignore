@@ -1,0 +1,7 @@
+.claude/
+.idea/
+bin/
+obj/
+out/
+publish-small/
+publish/
