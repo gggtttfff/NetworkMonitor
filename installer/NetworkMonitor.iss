@@ -98,18 +98,20 @@ begin
   end;
 end;
 
-procedure CurInstallStepChanged(CurInstallStep: TInstallStep);
+procedure CurStepChanged(CurStep: TSetupStep);
 begin
-  if CurInstallStep = isInstall then
+  if CurStep = ssInstall then
   begin
     if IsUpdate then
     begin
-      Log('更新安装: 从版本 ' + PreviousVersion + ' 更新到版本 {#MyAppVersion}');
+      Log('更新安装：从版本 ' + PreviousVersion + ' 更新到版本 {#MyAppVersion}');
     end
     else
     begin
-      Log('首次安装: 版本 {#MyAppVersion}');
+      Log('首次安装：版本 {#MyAppVersion}');
     end;
+  end;
+end;
   end;
 end;
 
@@ -137,9 +139,10 @@ procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
   AppDataDir: string;
 begin
-  if (CurUninstallStep = usUninstall) and RemoveDataOnUninstall then
+  if CurUninstallStep = usUninstall then
   begin
-    AppDataDir := ExpandConstant('{localappdata}\NetworkMonitor');
-    DeletePathIfExists(AppDataDir);
+      AppDataDir := ExpandConstant('{localappdata}\NetworkMonitor');
+      DeletePathIfExists(AppDataDir);
+    end;
   end;
 end;
