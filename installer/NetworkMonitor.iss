@@ -58,6 +58,17 @@ var
   IsUpdate: Boolean;
   PreviousVersion: String;
 
+function GetFileVersion(const FilePath: String): String;
+var
+  VersionMajor, VersionMinor, VersionBuild, VersionSub: Word;
+begin
+  Result := '';
+  if GetVersionNumbers(FilePath, VersionMajor, VersionMinor, VersionBuild, VersionSub) then
+  begin
+    Result := IntToStr(VersionMajor) + '.' + IntToStr(VersionMinor) + '.' + IntToStr(VersionBuild);
+  end;
+end;
+
 function InitializeSetup(): Boolean;
 var
   AppPath: string;
@@ -80,17 +91,6 @@ begin
   else
   begin
     Result := True;
-  end;
-end;
-
-function GetFileVersion(const FilePath: String): String;
-var
-  VersionMajor, VersionMinor, VersionBuild, VersionSub: Word;
-begin
-  Result := '';
-  if GetVersionNumbers(FilePath, VersionMajor, VersionMinor, VersionBuild, VersionSub) then
-  begin
-    Result := IntToStr(VersionMajor) + '.' + IntToStr(VersionMinor) + '.' + IntToStr(VersionBuild);
   end;
 end;
 
