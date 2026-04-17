@@ -60,11 +60,15 @@ var
 
 function GetFileVersion(const FilePath: String): String;
 var
+  VersionMS, VersionLS: Cardinal;
   VersionMajor, VersionMinor, VersionBuild: Cardinal;
 begin
   Result := '';
-  if GetVersionNumbers(FilePath, VersionMajor, VersionMinor, VersionBuild) then
+  if GetVersionNumbers(FilePath, VersionMS, VersionLS) then
   begin
+    VersionMajor := VersionMS shr 16;
+    VersionMinor := VersionMS and $FFFF;
+    VersionBuild := VersionLS shr 16;
     Result := IntToStr(VersionMajor) + '.' + IntToStr(VersionMinor) + '.' + IntToStr(VersionBuild);
   end;
 end;
