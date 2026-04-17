@@ -494,7 +494,7 @@ namespace NetworkMonitor
             serviceStatusLabel = new Label
             {
                 Text = "未检测",
-                Location = new Point(120, 20),
+                Location = new Point(155, 20),
                 Size = new Size(350, 25),
                 Font = new Font("微软雅黑", 9, FontStyle.Bold)
             };
