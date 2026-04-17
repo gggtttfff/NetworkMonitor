@@ -2,7 +2,8 @@ param(
     [string]$Version = "",
     [string]$Configuration = "Release",
     [string]$Runtime = "win-x64",
-    [string]$InnoSetupCompiler = "$Env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe"
+    [string]$InnoSetupCompiler = "$Env:ProgramFiles(x86)\Inno Setup 6\ISCC.exe",
+    [switch]$SkipPublish
 )
 
 $ErrorActionPreference = "Stop"
@@ -29,8 +30,15 @@ if ([string]::IsNullOrWhiteSpace($Version)) {
     }
 }
 
-Write-Host "[1/3] Publishing application..." -ForegroundColor Cyan
-dotnet publish $projectFile -c $Configuration -r $Runtime --self-contained true -p:PublishSingleFile=true -p:Version=$Version -p:InformationalVersion=$Version -o $publishDir
+if ($SkipPublish) {
+    Write-Host "[1/3] Skipping publish (using existing output)..." -ForegroundColor Cyan
+    if (!(Test-Path $publishDir)) {
+        throw "Publish directory not found: $publishDir`nRun without -SkipPublish or ensure publish output exists."
+    }
+} else {
+    Write-Host "[1/3] Publishing application..." -ForegroundColor Cyan
+    dotnet publish $projectFile -c $Configuration -r $Runtime --self-contained true -p:PublishSingleFile=true -p:Version=$Version -p:InformationalVersion=$Version -o $publishDir
+}
 
 if (!(Test-Path $InnoSetupCompiler)) {
     throw "Inno Setup compiler not found: $InnoSetupCompiler`nInstall Inno Setup 6 or pass -InnoSetupCompiler with a valid ISCC.exe path."

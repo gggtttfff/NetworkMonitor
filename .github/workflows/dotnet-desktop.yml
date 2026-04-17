@@ -78,21 +78,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
+      - name: Download Publish Artifact
+        uses: actions/download-artifact@v4
         with:
-          dotnet-version: ${{ env.DOTNET_VERSION }}
+          name: NetworkMonitor-publish-${{ env.RUNTIME_ID }}
+          path: ${{ env.PUBLISH_DIR }}
 
       - name: Resolve Release Version
         id: app_version
         shell: pwsh
         run: |
-          if ("${{ github.ref }}".StartsWith("refs/tags/v")) {
-            $version = "${{ github.ref_name }}".TrimStart('v')
-          } else {
-            [xml]$projectXml = Get-Content -Path ".\NetworkMonitor.csproj" -Encoding UTF8
-            $version = $projectXml.Project.PropertyGroup.Version | Select-Object -First 1
-          }
+          $version = "${{ github.ref_name }}".TrimStart('v')
           if ([string]::IsNullOrWhiteSpace($version)) {
             throw "Release version could not be resolved."
           }
@@ -101,25 +97,6 @@ jobs:
       - name: Install Inno Setup
         shell: pwsh
         run: choco install innosetup --yes --no-progress
-
-      - name: Debug Inno Setup Paths
-        shell: pwsh
-        run: |
-          Write-Host "ChocolateyInstall=$Env:ChocolateyInstall"
-          Write-Host "ProgramData=$Env:ProgramData"
-          $debugRoots = @(
-            "$Env:ChocolateyInstall",
-            "$Env:ProgramData\chocolatey",
-            "$Env:ProgramFiles(x86)",
-            "$Env:ProgramFiles",
-            "$Env:LOCALAPPDATA\Programs"
-          )
-          foreach ($root in $debugRoots) {
-            if (Test-Path $root) {
-              Write-Host "Searching: $root"
-              Get-ChildItem -Path $root -Filter ISCC.exe -Recurse -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName
-            }
-          }
 
       - name: Resolve Inno Setup Compiler
         id: iscc
@@ -160,7 +137,7 @@ jobs:
       - name: Build Installer
         shell: pwsh
         run: |
-          .\build-installer.ps1 -Version "${{ steps.app_version.outputs.value }}" -Configuration $Env:BUILD_CONFIGURATION -Runtime $Env:RUNTIME_ID -InnoSetupCompiler "${{ steps.iscc.outputs.path }}"
+          .\build-installer.ps1 -Version "${{ steps.app_version.outputs.value }}" -SkipPublish -InnoSetupCompiler "${{ steps.iscc.outputs.path }}"
 
       - name: Archive Publish Output
         shell: pwsh
