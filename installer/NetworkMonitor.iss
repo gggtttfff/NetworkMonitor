@@ -112,8 +112,6 @@ begin
     end;
   end;
 end;
-  end;
-end;
 
 function InitializeUninstall(): Boolean;
 begin
