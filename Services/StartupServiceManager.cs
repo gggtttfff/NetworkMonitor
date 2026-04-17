@@ -7,6 +7,7 @@ namespace NetworkMonitor
     {
         private const string RunKeyPath = @"Software\Microsoft\Windows\CurrentVersion\Run";
         private const string ServiceValueName = "NetworkMonitor";
+        public const string AutoStartArgument = "--autostart";
 
         public static bool IsInstalled()
         {
@@ -33,7 +34,7 @@ namespace NetworkMonitor
                     return false;
                 }
 
-                string command = $"\"{executablePath}\"";
+                string command = BuildStartupCommand(executablePath);
                 runKey.SetValue(ServiceValueName, command, RegistryValueKind.String);
                 message = "服务安装成功（已注册开机启动）";
                 return true;
@@ -65,6 +66,11 @@ namespace NetworkMonitor
                 message = $"服务卸载失败: {ex.Message}";
                 return false;
             }
+        }
+
+        public static string BuildStartupCommand(string executablePath)
+        {
+            return $"\"{executablePath}\" {AutoStartArgument}";
         }
     }
 }

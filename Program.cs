@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using System.Windows.Forms;
 
 namespace NetworkMonitor
@@ -6,11 +7,12 @@ namespace NetworkMonitor
     static class Program
     {
         [STAThread]
-        static void Main()
+        static void Main(string[] args)
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new MainForm());
+            bool isAutoStartLaunch = args.Any(arg => string.Equals(arg, StartupServiceManager.AutoStartArgument, StringComparison.OrdinalIgnoreCase));
+            Application.Run(new MainForm(isAutoStartLaunch));
         }
     }
 }

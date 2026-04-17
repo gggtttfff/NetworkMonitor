@@ -32,6 +32,9 @@ WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64os
 CloseApplications=yes
+CreateAppDir=yes
+UpdateUninstallLogAppName=yes
+DirExistsWarning=no
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
@@ -40,8 +43,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "创建桌面快捷方式"; GroupDescription: "附加任务:"; Flags: unchecked
 
 [Files]
-Source: "{#PublishDir}\\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "..\\appsettings.json"; DestDir: "{app}"; Flags: ignoreversion onlyifdoesntexist uninsneveruninstall
+Source: "{#PublishDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{autoprograms}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"
@@ -53,13 +55,66 @@ Filename: "{app}\{#MyAppExeName}"; Description: "启动 {#MyAppName}"; Flags: no
 [Code]
 var
   RemoveDataOnUninstall: Boolean;
+  IsUpdate: Boolean;
+  PreviousVersion: String;
+
+function InitializeSetup(): Boolean;
+var
+  AppPath: string;
+begin
+  AppPath := ExpandConstant('{localappdata}\Programs\{#MyAppName}\{#MyAppExeName}');
+  IsUpdate := FileExists(AppPath);
+  
+  if IsUpdate then
+  begin
+    PreviousVersion := GetFileVersion(AppPath);
+    Result := MsgBox(
+      '检测到已安装 NetworkMonitor' + #13#10 +
+      '当前版本: ' + PreviousVersion + #13#10 +
+      '新版本: {#MyAppVersion}' + #13#10 + #13#10 +
+      '是否更新到新版本？',
+      mbConfirmation,
+      MB_YESNO or MB_DEFBUTTON1
+    ) = IDYES;
+  end
+  else
+  begin
+    Result := True;
+  end;
+end;
+
+function GetFileVersion(const FilePath: String): String;
+var
+  VersionMajor, VersionMinor, VersionBuild, VersionSub: Word;
+begin
+  Result := '';
+  if GetVersionNumbers(FilePath, VersionMajor, VersionMinor, VersionBuild, VersionSub) then
+  begin
+    Result := IntToStr(VersionMajor) + '.' + IntToStr(VersionMinor) + '.' + IntToStr(VersionBuild);
+  end;
+end;
+
+procedure CurInstallStepChanged(CurInstallStep: TInstallStep);
+begin
+  if CurInstallStep = isInstall then
+  begin
+    if IsUpdate then
+    begin
+      Log('更新安装: 从版本 ' + PreviousVersion + ' 更新到版本 {#MyAppVersion}');
+    end
+    else
+    begin
+      Log('首次安装: 版本 {#MyAppVersion}');
+    end;
+  end;
+end;
 
 function InitializeUninstall(): Boolean;
 begin
   RemoveDataOnUninstall :=
     MsgBox(
-      '是否同时删除配置文件、日志和测试结果？' + #13#10 +
-      '选择"是"将删除安装目录下 appsettings.json、logs、test_results 和 debug。',
+      '是否同时删除用户数据？' + #13#10 +
+      '选择"是"将删除配置文件、日志和测试结果（位于 %LOCALAPPDATA%\NetworkMonitor）。',
       mbConfirmation,
       MB_YESNO or MB_DEFBUTTON2
     ) = IDYES;
@@ -76,17 +131,11 @@ end;
 
 procedure CurUninstallStepChanged(CurUninstallStep: TUninstallStep);
 var
-  AppDir: string;
+  AppDataDir: string;
 begin
   if (CurUninstallStep = usUninstall) and RemoveDataOnUninstall then
   begin
-    AppDir := ExpandConstant('{app}');
-    DeletePathIfExists(ExpandConstant('{app}\appsettings.json'));
-    DeletePathIfExists(ExpandConstant('{app}\logs'));
-    DeletePathIfExists(ExpandConstant('{app}\test_results'));
-    DeletePathIfExists(ExpandConstant('{app}\debug'));
-
-    if DirExists(AppDir) then
-      RemoveDir(AppDir);
+    AppDataDir := ExpandConstant('{localappdata}\NetworkMonitor');
+    DeletePathIfExists(AppDataDir);
   end;
 end;

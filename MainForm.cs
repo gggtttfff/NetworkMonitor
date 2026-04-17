@@ -32,8 +32,16 @@ namespace NetworkMonitor
         private RoundedButton loginTestButton = null!;
         private NumericUpDown intervalInput = null!;
         private NotifyIcon notifyIcon = null!;
+        private System.Windows.Forms.Timer adapterManagementTimer = null!;
         private TextBox logTextBox = null!;
+        private Panel monitorPanel = null!;
+        private Panel portOccupancyPanel = null!;
+        private DataGridView portOccupancyGrid = null!;
+        private TextBox portQueryTextBox = null!;
+        private TextBox portFilterTextBox = null!;
+        private Label portResultSummaryLabel = null!;
         private readonly Icon appIcon;
+        private readonly bool isAutoStartLaunch;
         private bool isMonitoring = false;
         private bool wasConnected = true;
         private CancellationTokenSource? monitoringCts = null;
@@ -52,6 +60,9 @@ namespace NetworkMonitor
         private DiagnosticLogger? diagnosticLogger = null;
         private readonly NetworkConnectionService networkConnectionService;
         private readonly CampusAutoLoginService campusAutoLoginService;
+        private readonly NetworkAdapterManager networkAdapterManager;
+        private readonly PortOccupancyService portOccupancyService;
+        private List<PortOccupancyEntry> currentPortEntries = new List<PortOccupancyEntry>();
         
         // 设置项
         private string loginUrl = "http://2.2.2.2";
@@ -81,9 +92,14 @@ namespace NetworkMonitor
         private int allDayDetectionInterval = 60;
         private bool allDayAutoLogin = false;
         private string themeMode = "TechDark";
+        private bool silentRunOnAutoStart = false;
         private string loginStrategy = "OnlyWhenDisconnected";
         private int loginRetryCount = 3;
         private int loginRetryDelay = 5;
+        private bool enableAdapterAutoManagement = false;
+        private bool showAdapterNotification = true;
+        private List<string> managedAdapterIds = new List<string>();
+        private List<AdapterScheduleEntry> adapterSchedule = AdapterScheduleEntry.CreateDefaultWeek();
         private System.Windows.Forms.Timer? timeRangeCheckTimer = null;  // 用于检查时间段的定时器
         
         // 时间记录
@@ -115,6 +131,8 @@ namespace NetworkMonitor
         private const int DWMWA_TEXT_COLOR = 36;
         private const int WM_NCLBUTTONDOWN = 0xA1;
         private const int HTCAPTION = 0x2;
+        private const int EM_GETFIRSTVISIBLELINE = 0x00CE;
+        private const int EM_LINESCROLL = 0x00B6;
 
         private uint originalVolume = 0;
         private static readonly Color StatusTagBorderColor = Color.FromArgb(10, 0, 0, 0);
@@ -190,8 +208,9 @@ namespace NetworkMonitor
             }
         }
 
-        public MainForm()
+        public MainForm(bool isAutoStartLaunch = false)
         {
+            this.isAutoStartLaunch = isAutoStartLaunch;
             appIcon = AppIconProvider.GetIcon();
             networkConnectionService = new NetworkConnectionService(
                 AddLog,
@@ -200,6 +219,8 @@ namespace NetworkMonitor
             campusAutoLoginService = new CampusAutoLoginService(
                 AddLog,
                 (context, ex) => diagnosticLogger?.LogNetworkErrorAsync(context, ex) ?? Task.CompletedTask);
+            networkAdapterManager = new NetworkAdapterManager();
+            portOccupancyService = new PortOccupancyService();
 
             LoadSettings();
             InitializeDiagnosticLogger();
@@ -258,12 +279,17 @@ namespace NetworkMonitor
                 allDayDetectionInterval = Math.Min(Math.Max(settings.AllDayDetectionInterval, 10), 3600);
                 allDayAutoLogin = settings.AllDayAutoLogin;
                 themeMode = string.IsNullOrWhiteSpace(settings.ThemeMode) ? "TechDark" : settings.ThemeMode;
+                silentRunOnAutoStart = settings.SilentRunOnAutoStart;
                 UiTheme.Apply(themeMode);
                 
                 // 加载登录策略设置
                 loginStrategy = settings.LoginStrategy;
                 loginRetryCount = settings.LoginRetryCount;
                 loginRetryDelay = settings.LoginRetryDelay;
+                enableAdapterAutoManagement = settings.EnableAdapterAutoManagement;
+                showAdapterNotification = settings.ShowAdapterNotification;
+                managedAdapterIds = settings.ManagedAdapterIds ?? new List<string>();
+                adapterSchedule = networkAdapterManager.NormalizeSchedule(settings.AdapterSchedule);
             }
             catch (Exception ex)
             {
@@ -306,9 +332,14 @@ namespace NetworkMonitor
                     AllDayDetectionInterval = allDayDetectionInterval,
                     AllDayAutoLogin = allDayAutoLogin,
                     ThemeMode = themeMode,
+                    SilentRunOnAutoStart = silentRunOnAutoStart,
                     LoginStrategy = loginStrategy,
                     LoginRetryCount = loginRetryCount,
-                    LoginRetryDelay = loginRetryDelay
+                    LoginRetryDelay = loginRetryDelay,
+                    EnableAdapterAutoManagement = enableAdapterAutoManagement,
+                    ShowAdapterNotification = showAdapterNotification,
+                    ManagedAdapterIds = new List<string>(managedAdapterIds),
+                    AdapterSchedule = networkAdapterManager.NormalizeSchedule(adapterSchedule)
                 };
                 
                 if (SettingsManager.Save(settings))
@@ -573,11 +604,15 @@ namespace NetworkMonitor
 
             // 创建托盘菜单
             var contextMenu = new ContextMenuStrip();
-            contextMenu.BackColor = UiTheme.BgDark;
-            contextMenu.ForeColor = UiTheme.TextPrimary;
+            contextMenu.BackColor = BackColor;
+            contextMenu.ForeColor = Color.Black;
             var showMenuItem = new ToolStripMenuItem("显示主窗口");
+            showMenuItem.BackColor = BackColor;
+            showMenuItem.ForeColor = Color.Black;
             showMenuItem.Click += (s, e) => ShowMainWindow();
             var exitMenuItem = new ToolStripMenuItem("退出");
+            exitMenuItem.BackColor = BackColor;
+            exitMenuItem.ForeColor = Color.Black;
             exitMenuItem.Click += (s, e) => ExitApplication();
             contextMenu.Items.Add(showMenuItem);
             contextMenu.Items.Add(new ToolStripSeparator());
@@ -683,6 +718,22 @@ namespace NetworkMonitor
                 Image = LoadNavIcon("nav-login.png")
             };
 
+            RoundedButton navPortOccupancyButton = new RoundedButton
+            {
+                Text = "端口占用",
+                Dock = DockStyle.Top,
+                Height = 46,
+                BackColor = Color.Transparent,
+                HoverBackColor = Color.Transparent,
+                ForeColor = Color.Black,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(18, 0, 12, 0),
+                BorderRadius = 0,
+                ShowBorder = false,
+                Font = new Font("微软雅黑", 11.5F, FontStyle.Bold),
+                Image = LoadNavIcon("nav-port-occupancy.png")
+            };
+
 
             settingsButton = new RoundedButton
             {
@@ -701,13 +752,13 @@ namespace NetworkMonitor
             };
             settingsButton.Click += SettingsButton_Click;
 
-            var navButtons = new[] { navServerButton, navIntegrationButton, settingsButton };
+            var navButtons = new[] { navServerButton, navIntegrationButton, navPortOccupancyButton, settingsButton };
             RoundedButton activeNavButton = navServerButton;
             Color navNormalColor = Color.Transparent;
             Color navHoverColor = Color.FromArgb(238, 238, 238);
             Color navActiveColor = Color.FromArgb(230, 230, 230);
 
-            void SetActiveNav(RoundedButton selectedButton, string title)
+            void SetActiveNav(RoundedButton selectedButton, string title, Panel? targetPanel = null)
             {
                 foreach (var btn in navButtons)
                 {
@@ -717,6 +768,15 @@ namespace NetworkMonitor
                 }
                 activeNavButton = selectedButton;
                 topTitle.Text = title;
+                if (monitorPanel != null)
+                {
+                    monitorPanel.Visible = targetPanel == null || targetPanel == monitorPanel;
+                }
+
+                if (portOccupancyPanel != null)
+                {
+                    portOccupancyPanel.Visible = targetPanel == portOccupancyPanel;
+                }
             }
 
             foreach (var btn in navButtons)
@@ -738,15 +798,21 @@ namespace NetworkMonitor
                 };
             }
 
-            navServerButton.Click += (_, _) => SetActiveNav(navServerButton, "监控中心");
+            navServerButton.Click += (_, _) => SetActiveNav(navServerButton, "监控中心", monitorPanel);
             navIntegrationButton.Click += (_, _) =>
             {
-                SetActiveNav(navIntegrationButton, "认证登录");
+                SetActiveNav(navIntegrationButton, "认证登录", monitorPanel);
                 OpenCampusLoginPage();
             };
-            settingsButton.Click += (_, _) => SetActiveNav(settingsButton, "设置");
+            navPortOccupancyButton.Click += async (_, _) =>
+            {
+                SetActiveNav(navPortOccupancyButton, "端口占用", portOccupancyPanel);
+                await RefreshPortOccupancyEntriesAsync();
+            };
+            settingsButton.Click += (_, _) => SetActiveNav(settingsButton, "设置", monitorPanel);
 
             sideBar.Controls.Add(settingsButton);
+            sideBar.Controls.Add(navPortOccupancyButton);
             sideBar.Controls.Add(navIntegrationButton);
             sideBar.Controls.Add(navServerButton);
             sideBar.Controls.Add(sideHeader);
@@ -837,14 +903,14 @@ namespace NetworkMonitor
                 BackColor = Color.FromArgb(255, 255, 255)
             };
 
-            var cardPanel = new Panel
+            monitorPanel = new Panel
             {
                 Dock = DockStyle.Fill,
                 BackColor = Color.FromArgb(255, 255, 255),
                 Padding = new Padding(16, 14, 16, 16)
             };
             // 添加阴影效果
-            cardPanel.Paint += CardPanel_Paint;
+            monitorPanel.Paint += CardPanel_Paint;
 
             var cardTitle = new Label
             {
@@ -1086,14 +1152,18 @@ namespace NetworkMonitor
                 Font = new Font("Consolas", 9)
             };
 
-            cardPanel.Controls.Add(logTextBox);
-            cardPanel.Controls.Add(logLabel);
-            cardPanel.Controls.Add(actionPanel);
-            cardPanel.Controls.Add(statusInfoPanel);
-            cardPanel.Controls.Add(statusHost);
-            cardPanel.Controls.Add(cardTitle);
+            monitorPanel.Controls.Add(logTextBox);
+            monitorPanel.Controls.Add(logLabel);
+            monitorPanel.Controls.Add(actionPanel);
+            monitorPanel.Controls.Add(statusInfoPanel);
+            monitorPanel.Controls.Add(statusHost);
+            monitorPanel.Controls.Add(cardTitle);
 
-            contentHost.Controls.Add(cardPanel);
+            portOccupancyPanel = BuildPortOccupancyPanel();
+            portOccupancyPanel.Visible = false;
+
+            contentHost.Controls.Add(portOccupancyPanel);
+            contentHost.Controls.Add(monitorPanel);
             rightPanel.Controls.Add(contentHost);
             rightPanel.Controls.Add(topBar);
 
@@ -1111,6 +1181,9 @@ namespace NetworkMonitor
             // 初始化定时器（保留以便向后兼容）
             networkCheckTimer = new System.Windows.Forms.Timer();
             timeRangeCheckTimer = new System.Windows.Forms.Timer();
+            adapterManagementTimer = new System.Windows.Forms.Timer();
+            adapterManagementTimer.Interval = 60 * 1000;
+            adapterManagementTimer.Tick += async (_, _) => await EvaluateAdapterManagementAsync(false);
 
             // 初始化日志更新定时器（用于批量更新UI避免卡顿）
             logUpdateTimer = new System.Windows.Forms.Timer();
@@ -1158,12 +1231,162 @@ namespace NetworkMonitor
             }
         }
 
+        private Panel BuildPortOccupancyPanel()
+        {
+            var panel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.FromArgb(255, 255, 255),
+                Padding = new Padding(16, 14, 16, 16)
+            };
+            panel.Paint += CardPanel_Paint;
+
+            var headerLabel = new Label
+            {
+                Text = "端口占用查询",
+                Dock = DockStyle.Top,
+                Height = 34,
+                Font = new Font("微软雅黑", 11F, FontStyle.Bold),
+                ForeColor = Color.FromArgb(31, 41, 55),
+                BackColor = Color.FromArgb(255, 255, 255)
+            };
+
+            var actionPanel = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                Height = 88,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = true,
+                Padding = new Padding(0, 6, 0, 0),
+                BackColor = Color.FromArgb(255, 255, 255)
+            };
+
+            var portQueryLabel = new Label
+            {
+                Text = "端口:",
+                Size = new Size(46, 34),
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = Color.FromArgb(75, 85, 99),
+                BackColor = Color.FromArgb(255, 255, 255)
+            };
+
+            portQueryTextBox = new TextBox
+            {
+                Size = new Size(100, 32),
+                BackColor = Color.FromArgb(245, 245, 245),
+                ForeColor = Color.FromArgb(31, 41, 55)
+            };
+
+            var queryButton = CreatePortActionButton("查询端口", 100);
+            queryButton.Click += async (_, _) => await QueryPortOccupancyAsync();
+
+            var refreshAllButton = CreatePortActionButton("刷新全量列表", 120);
+            refreshAllButton.Click += async (_, _) => await RefreshPortOccupancyEntriesAsync();
+
+            var filterLabel = new Label
+            {
+                Text = "筛选:",
+                Size = new Size(46, 34),
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = Color.FromArgb(75, 85, 99),
+                BackColor = Color.FromArgb(255, 255, 255)
+            };
+
+            portFilterTextBox = new TextBox
+            {
+                Size = new Size(180, 32),
+                BackColor = Color.FromArgb(245, 245, 245),
+                ForeColor = Color.FromArgb(31, 41, 55)
+            };
+            portFilterTextBox.TextChanged += (_, _) => ApplyPortFilter();
+
+            var copyButton = CreatePortActionButton("复制信息", 100);
+            copyButton.Click += (_, _) => CopySelectedPortEntry();
+
+            var killButton = CreatePortActionButton("结束占用进程", 130);
+            killButton.Click += async (_, _) => await KillSelectedPortProcessAsync();
+
+            actionPanel.Controls.Add(portQueryLabel);
+            actionPanel.Controls.Add(portQueryTextBox);
+            actionPanel.Controls.Add(queryButton);
+            actionPanel.Controls.Add(refreshAllButton);
+            actionPanel.Controls.Add(filterLabel);
+            actionPanel.Controls.Add(portFilterTextBox);
+            actionPanel.Controls.Add(copyButton);
+            actionPanel.Controls.Add(killButton);
+
+            portResultSummaryLabel = new Label
+            {
+                Text = "结果: 尚未查询",
+                Dock = DockStyle.Top,
+                Height = 28,
+                Font = new Font("微软雅黑", 9F),
+                ForeColor = Color.FromArgb(107, 114, 128),
+                BackColor = Color.FromArgb(255, 255, 255)
+            };
+
+            portOccupancyGrid = new DataGridView
+            {
+                Dock = DockStyle.Fill,
+                AllowUserToAddRows = false,
+                AllowUserToDeleteRows = false,
+                AllowUserToResizeRows = false,
+                ReadOnly = true,
+                MultiSelect = false,
+                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                RowHeadersVisible = false,
+                AutoGenerateColumns = false,
+                BackgroundColor = Color.FromArgb(245, 245, 245),
+                BorderStyle = BorderStyle.None
+            };
+            portOccupancyGrid.Columns.Add(CreatePortColumn("Protocol", "协议", 70));
+            portOccupancyGrid.Columns.Add(CreatePortColumn("LocalAddress", "本地地址", 180));
+            portOccupancyGrid.Columns.Add(CreatePortColumn("Port", "端口", 70));
+            portOccupancyGrid.Columns.Add(CreatePortColumn("State", "状态", 90));
+            portOccupancyGrid.Columns.Add(CreatePortColumn("ProcessId", "PID", 70));
+            portOccupancyGrid.Columns.Add(CreatePortColumn("ProcessName", "进程名", 130));
+            portOccupancyGrid.Columns.Add(CreatePortColumn("ExecutablePath", "路径", 280, DataGridViewAutoSizeColumnMode.Fill));
+
+            panel.Controls.Add(portOccupancyGrid);
+            panel.Controls.Add(portResultSummaryLabel);
+            panel.Controls.Add(actionPanel);
+            panel.Controls.Add(headerLabel);
+            return panel;
+        }
+
+        private static RoundedButton CreatePortActionButton(string text, int width)
+        {
+            return new RoundedButton
+            {
+                Text = text,
+                Size = new Size(width, 34),
+                BackColor = Color.FromArgb(255, 255, 255),
+                ForeColor = Color.Black,
+                BorderRadius = 6
+            };
+        }
+
+        private static DataGridViewTextBoxColumn CreatePortColumn(string propertyName, string headerText, int width, DataGridViewAutoSizeColumnMode autoSizeMode = DataGridViewAutoSizeColumnMode.None)
+        {
+            return new DataGridViewTextBoxColumn
+            {
+                DataPropertyName = propertyName,
+                HeaderText = headerText,
+                Width = width,
+                AutoSizeMode = autoSizeMode
+            };
+        }
+
         private async void MainForm_Load(object? sender, EventArgs e)
         {
             if (!EnsureInitialRequiredSettings())
             {
                 return;
             }
+
+            ApplySilentStartupIfNeeded();
+            adapterManagementTimer.Start();
+            await EvaluateAdapterManagementAsync(true);
 
             bool shouldAutoStartMonitoring = autoStartMonitoring || lastMonitoringEnabled;
             if (shouldAutoStartMonitoring)
@@ -1257,6 +1480,11 @@ namespace NetworkMonitor
 
             try
             {
+                int firstVisibleLineBefore = GetFirstVisibleLogLine();
+                int totalLinesBefore = Math.Max(logTextBox.Lines.Length, 1);
+                int visibleLines = GetVisibleLogLineCount();
+                bool wasNearBottom = firstVisibleLineBefore + visibleLines >= totalLinesBefore - 1;
+
                 // 批量添加消息
                 StringBuilder sb = new StringBuilder();
                 foreach (var message in messages)
@@ -1267,21 +1495,65 @@ namespace NetworkMonitor
 
                 // 限制行数，避免内存无限增长
                 int currentLines = logTextBox.Lines.Length;
+                int removedLines = 0;
                 if (currentLines > MaxLogLines)
                 {
                     int linesToRemove = currentLines - MaxLogLines;
+                    removedLines = linesToRemove;
                     int index = logTextBox.GetFirstCharIndexFromLine(linesToRemove);
                     logTextBox.Select(0, index);
                     logTextBox.SelectedText = "";
                 }
 
-                // 滚动到底部
-                logTextBox.SelectionStart = logTextBox.Text.Length;
-                logTextBox.ScrollToCaret();
+                if (wasNearBottom)
+                {
+                    logTextBox.SelectionStart = logTextBox.Text.Length;
+                    logTextBox.ScrollToCaret();
+                }
+                else
+                {
+                    RestoreLogViewport(firstVisibleLineBefore, removedLines);
+                }
             }
             finally
             {
                 logTextBox.ResumeLayout();
+            }
+        }
+
+        private int GetFirstVisibleLogLine()
+        {
+            if (logTextBox == null || !logTextBox.IsHandleCreated)
+            {
+                return 0;
+            }
+
+            return (int)SendMessage(logTextBox.Handle, EM_GETFIRSTVISIBLELINE, IntPtr.Zero, IntPtr.Zero);
+        }
+
+        private int GetVisibleLogLineCount()
+        {
+            if (logTextBox == null)
+            {
+                return 1;
+            }
+
+            return Math.Max(1, logTextBox.ClientSize.Height / Math.Max(logTextBox.Font.Height, 1));
+        }
+
+        private void RestoreLogViewport(int firstVisibleLineBefore, int removedLines)
+        {
+            if (logTextBox == null || !logTextBox.IsHandleCreated)
+            {
+                return;
+            }
+
+            int targetLine = Math.Max(0, firstVisibleLineBefore - removedLines);
+            int currentFirstVisibleLine = GetFirstVisibleLogLine();
+            int delta = targetLine - currentFirstVisibleLine;
+            if (delta != 0)
+            {
+                SendMessage(logTextBox.Handle, EM_LINESCROLL, IntPtr.Zero, (IntPtr)delta);
             }
         }
 
@@ -1298,10 +1570,26 @@ namespace NetworkMonitor
 
         private void ShowMainWindow()
         {
+            this.Opacity = 1;
+            this.ShowInTaskbar = true;
             this.Show();
             this.WindowState = FormWindowState.Normal;
             this.BringToFront();
             this.Activate();
+        }
+
+        private void ApplySilentStartupIfNeeded()
+        {
+            if (!isAutoStartLaunch || !silentRunOnAutoStart)
+            {
+                return;
+            }
+
+            this.ShowInTaskbar = false;
+            this.Opacity = 0;
+            this.WindowState = FormWindowState.Minimized;
+            BeginInvoke(new Action(() => this.Hide()));
+            AddLog("检测到开机自启动，按设置静默运行");
         }
 
         private void ExitApplication()
@@ -1310,6 +1598,7 @@ namespace NetworkMonitor
             isMonitoring = false;
             networkCheckTimer.Stop();
             logUpdateTimer.Stop();
+            adapterManagementTimer.Stop();
             notifyIcon.Visible = false;
             diagnosticLogger?.Dispose();
             Application.Exit();
@@ -1472,6 +1761,41 @@ namespace NetworkMonitor
             AddLog("监控已停止");
         }
 
+        private async Task EvaluateAdapterManagementAsync(bool forceNotification)
+        {
+            if (!enableAdapterAutoManagement || managedAdapterIds.Count == 0)
+            {
+                return;
+            }
+
+            var adapters = networkAdapterManager.GetPhysicalAdapters()
+                .Where(adapter => managedAdapterIds.Contains(adapter.Id, StringComparer.OrdinalIgnoreCase))
+                .ToList();
+
+            if (adapters.Count == 0)
+            {
+                return;
+            }
+
+            var evaluation = networkAdapterManager.EvaluateSchedule(adapterSchedule, DateTime.Now);
+            foreach (var adapter in adapters)
+            {
+                if (adapter.IsEnabled == evaluation.ShouldBeEnabled)
+                {
+                    continue;
+                }
+
+                var result = await Task.Run(() => networkAdapterManager.SetAdapterEnabled(adapter.Name, evaluation.ShouldBeEnabled));
+                AddLog($"{result.Message}，计划: {evaluation.Reason}");
+                if (showAdapterNotification && (forceNotification || result.Success))
+                {
+                    var title = evaluation.ShouldBeEnabled ? "网卡已启用" : "网卡已禁用";
+                    var icon = result.Success ? ToolTipIcon.Info : ToolTipIcon.Warning;
+                    ShowBalloonTipWithSound(3000, title, $"{adapter.Name}\n{result.Message}", icon);
+                }
+            }
+        }
+
         private AppSettings BuildCurrentSettings()
         {
             return new AppSettings
@@ -1504,9 +1828,14 @@ namespace NetworkMonitor
                 AllDayDetectionInterval = allDayDetectionInterval,
                 AllDayAutoLogin = allDayAutoLogin,
                 ThemeMode = themeMode,
+                SilentRunOnAutoStart = silentRunOnAutoStart,
                 LoginStrategy = loginStrategy,
                 LoginRetryCount = loginRetryCount,
-                LoginRetryDelay = loginRetryDelay
+                LoginRetryDelay = loginRetryDelay,
+                EnableAdapterAutoManagement = enableAdapterAutoManagement,
+                ShowAdapterNotification = showAdapterNotification,
+                ManagedAdapterIds = new List<string>(managedAdapterIds),
+                AdapterSchedule = networkAdapterManager.NormalizeSchedule(adapterSchedule)
             };
         }
 
@@ -1537,9 +1866,14 @@ namespace NetworkMonitor
             enableAllDayDetection = settingsForm.EnableAllDayDetection;
             allDayDetectionInterval = settingsForm.AllDayDetectionInterval;
             allDayAutoLogin = settingsForm.AllDayAutoLogin;
+            silentRunOnAutoStart = settingsForm.SilentRunOnAutoStart;
             loginStrategy = settingsForm.LoginStrategy;
             loginRetryCount = settingsForm.LoginRetryCount;
             loginRetryDelay = settingsForm.LoginRetryDelay;
+            enableAdapterAutoManagement = settingsForm.EnableAdapterAutoManagement;
+            showAdapterNotification = settingsForm.ShowAdapterNotification;
+            managedAdapterIds = new List<string>(settingsForm.ManagedAdapterIds);
+            adapterSchedule = networkAdapterManager.NormalizeSchedule(settingsForm.AdapterSchedule);
         }
 
         private bool EnsureInitialRequiredSettings()
@@ -1587,9 +1921,143 @@ namespace NetworkMonitor
 
                 // 保存设置到文件
                 SaveSettings();
+                _ = EvaluateAdapterManagementAsync(true);
                 MessageBox.Show("设置已保存", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
                 AddLog($"设置已更新: {loginUrl}, 检测目标: {primaryDns}/{secondaryDns}, 用户名: {username}, 重试{loginRetryCount}次");
             }
+        }
+
+        private async Task RefreshPortOccupancyEntriesAsync()
+        {
+            try
+            {
+                AddLog("开始刷新全量端口占用列表...");
+                var entries = await Task.Run(() => portOccupancyService.QueryAll());
+                currentPortEntries = entries.ToList();
+                ApplyPortFilter();
+                portResultSummaryLabel.Text = $"结果: 共 {currentPortEntries.Count} 条 TCP/UDP 占用记录";
+                AddLog($"端口占用列表刷新完成，共 {currentPortEntries.Count} 条记录");
+            }
+            catch (Exception ex)
+            {
+                AddLog($"刷新端口占用列表失败: {ex.Message}");
+                MessageBox.Show($"刷新端口占用列表失败: {ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private async Task QueryPortOccupancyAsync()
+        {
+            if (!int.TryParse(portQueryTextBox.Text.Trim(), out int port) || port < 0 || port > 65535)
+            {
+                MessageBox.Show("请输入 0-65535 范围内的有效端口号。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            try
+            {
+                AddLog($"开始查询端口占用: {port}");
+                var entries = await Task.Run(() => portOccupancyService.QueryByPort(port));
+                currentPortEntries = entries.ToList();
+                ApplyPortFilter();
+                portResultSummaryLabel.Text = currentPortEntries.Count == 0
+                    ? $"结果: 端口 {port} 当前未检测到占用"
+                    : $"结果: 端口 {port} 共 {currentPortEntries.Count} 条占用记录";
+                AddLog(currentPortEntries.Count == 0
+                    ? $"端口 {port} 未检测到占用"
+                    : $"端口 {port} 查询完成，共 {currentPortEntries.Count} 条记录");
+            }
+            catch (Exception ex)
+            {
+                AddLog($"查询端口 {port} 失败: {ex.Message}");
+                MessageBox.Show($"查询端口失败: {ex.Message}", "错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        private void ApplyPortFilter()
+        {
+            if (portOccupancyGrid == null)
+            {
+                return;
+            }
+
+            string filter = portFilterTextBox?.Text.Trim() ?? string.Empty;
+            IEnumerable<PortOccupancyEntry> filtered = currentPortEntries;
+            if (!string.IsNullOrWhiteSpace(filter))
+            {
+                filtered = currentPortEntries.Where(entry =>
+                    entry.Port.ToString().Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                    entry.ProcessName.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                    entry.LocalAddress.Contains(filter, StringComparison.OrdinalIgnoreCase) ||
+                    entry.Protocol.Contains(filter, StringComparison.OrdinalIgnoreCase));
+            }
+
+            portOccupancyGrid.DataSource = filtered.ToList();
+        }
+
+        private PortOccupancyEntry? GetSelectedPortEntry()
+        {
+            return portOccupancyGrid?.CurrentRow?.DataBoundItem as PortOccupancyEntry;
+        }
+
+        private void CopySelectedPortEntry()
+        {
+            var entry = GetSelectedPortEntry();
+            if (entry == null)
+            {
+                MessageBox.Show("请先选择一条端口占用记录。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            string content = $"协议: {entry.Protocol}{Environment.NewLine}" +
+                             $"本地地址: {entry.LocalAddress}{Environment.NewLine}" +
+                             $"端口: {entry.Port}{Environment.NewLine}" +
+                             $"状态: {entry.State}{Environment.NewLine}" +
+                             $"PID: {entry.ProcessId}{Environment.NewLine}" +
+                             $"进程名: {entry.ProcessName}{Environment.NewLine}" +
+                             $"路径: {entry.ExecutablePath}";
+            Clipboard.SetText(content);
+            AddLog($"已复制端口 {entry.Port} / PID {entry.ProcessId} 的占用信息");
+        }
+
+        private async Task KillSelectedPortProcessAsync()
+        {
+            var entry = GetSelectedPortEntry();
+            if (entry == null)
+            {
+                MessageBox.Show("请先选择一条端口占用记录。", "提示", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            var confirm = MessageBox.Show(
+                $"将提权结束以下进程树：\n\nPID: {entry.ProcessId}\n进程名: {entry.ProcessName}\n端口: {entry.Port}/{entry.Protocol}\n\n是否继续？",
+                "确认结束进程",
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+            if (confirm != DialogResult.Yes)
+            {
+                return;
+            }
+
+            AddLog($"准备提权结束端口占用进程树: PID {entry.ProcessId}, {entry.ProcessName}");
+            var result = await Task.Run(() => portOccupancyService.KillProcessTreeElevated(entry.ProcessId));
+            AddLog(result.Message);
+
+            if (result.Success)
+            {
+                MessageBox.Show(result.Message, "成功", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                if (!string.IsNullOrWhiteSpace(portQueryTextBox.Text))
+                {
+                    await QueryPortOccupancyAsync();
+                }
+                else
+                {
+                    await RefreshPortOccupancyEntriesAsync();
+                }
+
+                return;
+            }
+
+            MessageBox.Show(result.Message, result.UserCanceledElevation ? "已取消" : "失败", MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
 
         private async void LoginTestButton_Click(object? sender, EventArgs e)

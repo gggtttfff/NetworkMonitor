@@ -1,6 +1,8 @@
 using System;
 using System.IO;
+using System.Text.Json.Nodes;
 using System.Text.Json;
+using System.Collections.Generic;
 
 namespace NetworkMonitor
 {
@@ -39,36 +41,83 @@ namespace NetworkMonitor
         public int AllDayDetectionInterval { get; set; } = 60; // 监控时间外检测间隔（秒）
         public bool AllDayAutoLogin { get; set; } = false; // 监控时间外是否自动登录
         public string ThemeMode { get; set; } = "TechDark"; // 主题模式：TechDark, MintLight
+        public bool SilentRunOnAutoStart { get; set; } = false; // 开机自启动后静默运行
         
         // 登录请求策略
         public string LoginStrategy { get; set; } = "OnlyWhenDisconnected"; // 登录策略：OnlyWhenDisconnected, AlwaysTry, Smart
         public int LoginRetryCount { get; set; } = 3; // 登录失败重试次数
         public int LoginRetryDelay { get; set; } = 5; // 重试间隔（秒）
+        
+        // 网卡管理
+        public bool EnableAdapterAutoManagement { get; set; } = false;
+        public bool ShowAdapterNotification { get; set; } = true;
+        public List<string> ManagedAdapterIds { get; set; } = new List<string>();
+        public List<AdapterScheduleEntry> AdapterSchedule { get; set; } = AdapterScheduleEntry.CreateDefaultWeek();
     }
 
     /// <summary>
     /// 设置持久化管理器
     /// </summary>
-    public static class SettingsManager
+public static class SettingsManager
     {
+        private static readonly string AppDataDir = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "NetworkMonitor"
+        );
+
         private static readonly string SettingsFilePath = Path.Combine(
-            AppDomain.CurrentDomain.BaseDirectory, 
+            AppDataDir,
+            "appsettings.json"
+        );
+
+        private static readonly string OldSettingsFilePath = Path.Combine(
+            AppDomain.CurrentDomain.BaseDirectory,
             "appsettings.json"
         );
 
         private static readonly JsonSerializerOptions JsonOptions = new JsonSerializerOptions
         {
-            WriteIndented = true, // 格式化输出
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase // 使用驼峰命名
+            WriteIndented = true,
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
         };
 
-        /// <summary>
-        /// 加载设置
-        /// </summary>
+        private static bool _migrated = false;
+
+        private static void EnsureDataDirectoryExists()
+        {
+            if (!Directory.Exists(AppDataDir))
+            {
+                Directory.CreateDirectory(AppDataDir);
+            }
+        }
+
+        private static void MigrateOldSettingsIfNeeded()
+        {
+            if (_migrated) return;
+
+            if (File.Exists(OldSettingsFilePath) && !File.Exists(SettingsFilePath))
+            {
+                try
+                {
+                    EnsureDataDirectoryExists();
+                    File.Copy(OldSettingsFilePath, SettingsFilePath);
+                    System.Diagnostics.Debug.WriteLine($"配置文件已迁移: {OldSettingsFilePath} -> {SettingsFilePath}");
+                }
+                catch (Exception ex)
+                {
+                    System.Diagnostics.Debug.WriteLine($"迁移配置文件失败: {ex.Message}");
+                }
+            }
+
+            _migrated = true;
+        }
+
         public static AppSettings Load()
         {
             try
             {
+                MigrateOldSettingsIfNeeded();
+
                 if (File.Exists(SettingsFilePath))
                 {
                     string json = File.ReadAllText(SettingsFilePath);
@@ -76,28 +125,57 @@ namespace NetworkMonitor
                     
                     if (settings != null)
                     {
+                        bool migratePlainPassword = false;
+                        if (!string.IsNullOrEmpty(settings.Password))
+                        {
+                            if (SecurityUtility.TryUnprotectForCurrentUser(settings.Password, out var decryptedPassword))
+                            {
+                                settings.Password = decryptedPassword;
+                            }
+                            else if (SecurityUtility.IsProtectedValue(settings.Password))
+                            {
+                                settings.Password = string.Empty;
+                            }
+                            else
+                            {
+                                migratePlainPassword = true;
+                            }
+                        }
+
+                        if (migratePlainPassword)
+                        {
+                            Save(settings);
+                        }
+
                         return settings;
                     }
                 }
             }
             catch (Exception ex)
             {
-                // 加载失败时记录错误但不中断程序
                 System.Diagnostics.Debug.WriteLine($"加载设置失败: {ex.Message}");
             }
 
-            // 返回默认设置
             return new AppSettings();
         }
 
         /// <summary>
         /// 保存设置
         /// </summary>
-        public static bool Save(AppSettings settings)
+public static bool Save(AppSettings settings)
         {
             try
             {
-                string json = JsonSerializer.Serialize(settings, JsonOptions);
+                EnsureDataDirectoryExists();
+
+                var jsonNode = JsonSerializer.SerializeToNode(settings, JsonOptions)?.AsObject();
+                if (jsonNode == null)
+                {
+                    return false;
+                }
+
+                jsonNode["password"] = SecurityUtility.ProtectForCurrentUser(settings.Password);
+                string json = jsonNode.ToJsonString(JsonOptions);
                 File.WriteAllText(SettingsFilePath, json);
                 return true;
             }
@@ -108,12 +186,14 @@ namespace NetworkMonitor
             }
         }
 
-        /// <summary>
-        /// 获取设置文件路径
-        /// </summary>
         public static string GetSettingsFilePath()
         {
             return SettingsFilePath;
+        }
+
+        public static string GetAppDataDirectory()
+        {
+            return AppDataDir;
         }
     }
 }

@@ -69,7 +69,6 @@ namespace NetworkMonitor
                 
                 if (!initialResponse.Success)
                 {
-                    // 如果获取参数失败,尝试使用备用登录方法
                     Log("\n标准登录流程失败,尝试备用登录方法...");
                     result = await TryFallbackAuthenticationAsync(httpClient);
                     if (result.Success)
@@ -79,6 +78,16 @@ namespace NetworkMonitor
                     
                     result.Success = false;
                     result.Message = initialResponse.Message;
+                    return result;
+                }
+                
+                // 如果 portalScript.do 已经返回认证成功，直接返回
+                if (initialResponse.Message == "认证成功")
+                {
+                    Log("✓ 通过 portalScript.do 认证成功");
+                    result.Success = true;
+                    result.Message = "认证成功！已连接到校园网";
+                    result.StatusCode = HttpStatusCode.OK;
                     return result;
                 }
 
@@ -133,7 +142,6 @@ namespace NetworkMonitor
             {
                 Log($"访问 {_portalUrl} 检查认证状态...");
                 
-                // 使用共享的 HttpClient 实例
                 var request = new HttpRequestMessage(HttpMethod.Get, _portalUrl);
                 request.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
                 
@@ -142,6 +150,27 @@ namespace NetworkMonitor
                 
                 Log($"响应状态码: {(int)response.StatusCode}");
                 Log($"响应大小: {content.Length} 字节");
+                
+                // 如果是 JavaScript 重定向，跟随重定向到 portalScript.do
+                if (content.Contains("location.replace"))
+                {
+                    var redirectUrl = ExtractRedirectUrl(content);
+                    if (!string.IsNullOrEmpty(redirectUrl))
+                    {
+                        Log($"检测到 JS 重定向，跟随到: {redirectUrl.Substring(0, Math.Min(80, redirectUrl.Length))}...");
+                        
+                        var redirectRequest = new HttpRequestMessage(HttpMethod.Get, redirectUrl);
+                        redirectRequest.Headers.Add("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+                        
+                        using var redirectResponse = await _sharedHttpClient.SendAsync(redirectRequest);
+                        content = await redirectResponse.Content.ReadAsStringAsync();
+                        
+                        Log($"重定向响应状态码: {(int)redirectResponse.StatusCode}");
+                        Log($"重定向响应大小: {content.Length} 字节");
+                        
+                        await SaveDebugResponseAsync(content, "check_auth_redirect");
+                    }
+                }
                 
                 // 检查各种成功标志
                 bool isAuthenticated = content.Contains("认证成功") || 
@@ -157,7 +186,6 @@ namespace NetworkMonitor
                 else
                 {
                     Log("未检测到认证成功标志");
-                    // 保存响应以便调试
                     await SaveDebugResponseAsync(content, "check_auth");
                 }
                 
@@ -166,10 +194,7 @@ namespace NetworkMonitor
             catch (Exception ex)
             {
                 Log($"检查认证状态失败: {ex.Message}");
-                
-                // 触发网络错误事件
                 OnNetworkError?.Invoke(ex);
-                
                 return false;
             }
         }
@@ -217,32 +242,57 @@ namespace NetworkMonitor
                 var queryString = BuildQueryString(loginData);
                 var initialUrl = $"{_portalUrl}/quickauth.do?{queryString}";
                 
+                Log($"请求 URL: {initialUrl.Substring(0, Math.Min(100, initialUrl.Length))}...");
+                
                 var response = await httpClient.GetAsync(initialUrl);
                 var content = await response.Content.ReadAsStringAsync();
                 
                 Log($"初始响应状态码: {(int)response.StatusCode}");
                 await SaveDebugResponseAsync(content, "initial");
-
+                
                 // 从响应中提取参数
                 if (response.Headers.Location != null)
                 {
                     var redirectUrl = response.Headers.Location.ToString();
-                    Log($"检测到重定向: {redirectUrl}");
+                    Log($"检测到 HTTP 重定向: {redirectUrl}");
                     ExtractParametersFromUrl(redirectUrl, loginData);
                 }
                 else if (content.Contains("location.replace"))
                 {
                     ExtractParametersFromJavaScript(content, loginData);
+                    
+                    // 获取重定向 URL 并访问 portalScript.do 完成认证
+                    var portalScriptUrl = ExtractRedirectUrl(content);
+                    if (!string.IsNullOrEmpty(portalScriptUrl))
+                    {
+                        Log($"跟随 JS 重定向到 portalScript.do...");
+                        
+                        var portalResponse = await httpClient.GetAsync(portalScriptUrl);
+                        var portalContent = await portalResponse.Content.ReadAsStringAsync();
+                        
+                        Log($"portalScript 响应状态码: {(int)portalResponse.StatusCode}");
+                        Log($"portalScript 响应大小: {portalContent.Length} 字节");
+                        
+                        await SaveDebugResponseAsync(portalContent, "portal_script");
+                        
+                        // 检查是否已经认证成功
+                        if (portalContent.Contains("认证成功") || 
+                            portalContent.Contains("连接网络") ||
+                            portalContent.Contains("您可以关闭该页面") ||
+                            portalContent.Contains("disconnconfig"))
+                        {
+                            Log("✓ portalScript 返回认证成功页面");
+                            return (true, "认证成功");
+                        }
+                    }
                 }
 
                 return (true, "参数提取成功");
             }
             catch (HttpRequestException httpEx)
             {
-                // HTTP请求异常，可能是Socket错误
                 Log($"获取参数时HTTP请求失败: {httpEx.Message}");
                 
-                // 检查是否是Socket错误
                 if (httpEx.InnerException is System.Net.Sockets.SocketException socketEx)
                 {
                     Log($"Socket错误: {socketEx.ErrorCode} ({socketEx.SocketErrorCode})");
@@ -443,6 +493,18 @@ namespace NetworkMonitor
                     Log($"提取到编码URL: {encodedUrl.Substring(0, Math.Min(100, encodedUrl.Length))}...");
                 }
             }
+        }
+
+        private string? ExtractRedirectUrl(string content)
+        {
+            var pattern = @"location\.replace\(\""([^\""]+?)\""\)";
+            var match = Regex.Match(content, pattern);
+            
+            if (match.Success)
+            {
+                return match.Groups[1].Value;
+            }
+            return null;
         }
 
         private void SetRefererHeader(HttpClient httpClient, string authServer, Dictionary<string, string> loginData)

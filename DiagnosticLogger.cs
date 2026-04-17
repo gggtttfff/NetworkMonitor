@@ -1,6 +1,7 @@
 using System;
 using System.IO;
 using System.Net.Http;
+using System.Net.NetworkInformation;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -47,7 +48,7 @@ namespace NetworkMonitor
         /// <param name="retentionDays">日志保留天数，默认30天</param>
         public DiagnosticLogger(string? logDirectory = null, int maxLogFileSizeMB = 10, int maxLogFileCount = 30, int retentionDays = 30)
         {
-            _logDirectory = logDirectory ?? Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "logs");
+            _logDirectory = logDirectory ?? Path.Combine(SettingsManager.GetAppDataDirectory(), "logs");
             _maxLogFileSizeBytes = maxLogFileSizeMB * 1024 * 1024;
             _maxLogFileCount = maxLogFileCount;
             _retentionDays = Math.Max(1, retentionDays);
@@ -68,7 +69,7 @@ namespace NetworkMonitor
         /// <summary>
         /// 初始化日志文件
         /// </summary>
-        private void InitializeLogFile()
+private void InitializeLogFile()
         {
             try
             {
@@ -107,11 +108,109 @@ namespace NetworkMonitor
                 // 写入启动标记
                 _currentWriter.WriteLine();
                 _currentWriter.WriteLine($"========== 日志会话开始 {DateTime.Now:yyyy-MM-dd HH:mm:ss} ==========");
+                
+                // 写入系统信息
+                WriteSystemInfo(_currentWriter);
             }
             catch (Exception ex)
             {
                 // 静默失败，但输出调试信息
                 System.Diagnostics.Debug.WriteLine($"初始化日志文件失败: {ex.Message}");
+            }
+        }
+
+        private void WriteSystemInfo(StreamWriter writer)
+        {
+            try
+            {
+                writer.WriteLine();
+                writer.WriteLine("========== 系统信息 ==========");
+                
+                // 操作系统信息
+                writer.WriteLine($"操作系统: {Environment.OSVersion}");
+                writer.WriteLine($"主机名: {Environment.MachineName}");
+                writer.WriteLine($"用户名: {Environment.UserName}");
+                writer.WriteLine($"程序版本: V{AppVersionProvider.GetDisplayVersion()}");
+                writer.WriteLine($"运行目录: {AppDomain.CurrentDomain.BaseDirectory}");
+                writer.WriteLine($"数据目录: {SettingsManager.GetAppDataDirectory()}");
+                
+                // CPU 信息
+                writer.WriteLine();
+                writer.WriteLine("--- CPU 信息 ---");
+                writer.WriteLine($"处理器数量: {Environment.ProcessorCount}");
+                
+                // 内存信息
+                writer.WriteLine();
+                writer.WriteLine("--- 内存信息 ---");
+                var totalMemory = GC.GetGCMemoryInfo().TotalAvailableMemoryBytes / (1024 * 1024);
+                writer.WriteLine($"可用内存: {totalMemory} MB");
+                
+                // 网络适配器信息
+                writer.WriteLine();
+                writer.WriteLine("--- 网络适配器 ---");
+                try
+                {
+                    var interfaces = NetworkInterface.GetAllNetworkInterfaces();
+                    foreach (var ni in interfaces)
+                    {
+                        if (ni.NetworkInterfaceType == NetworkInterfaceType.Loopback ||
+                            ni.NetworkInterfaceType == NetworkInterfaceType.Tunnel ||
+                            ni.NetworkInterfaceType == NetworkInterfaceType.Unknown)
+                            continue;
+
+                        writer.WriteLine($"[{ni.Name}]");
+                        writer.WriteLine($"  描述: {ni.Description}");
+                        writer.WriteLine($"  类型: {ni.NetworkInterfaceType}");
+                        writer.WriteLine($"  状态: {ni.OperationalStatus}");
+                        
+                        try
+                        {
+                            var mac = ni.GetPhysicalAddress();
+                            if (mac != null && mac.GetAddressBytes().Length > 0)
+                            {
+                                writer.WriteLine($"  MAC: {mac}");
+                            }
+                        }
+                        catch { }
+
+                        try
+                        {
+                            var ipProps = ni.GetIPProperties();
+                            var unicastAddresses = ipProps.UnicastAddresses;
+                            foreach (var addr in unicastAddresses)
+                            {
+                                if (addr.Address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                                {
+                                    writer.WriteLine($"  IPv4: {addr.Address}");
+                                }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    writer.WriteLine($"获取网络适配器信息失败: {ex.Message}");
+                }
+                
+                // 网络配置
+                writer.WriteLine();
+                writer.WriteLine("--- 网络配置 ---");
+                var settings = SettingsManager.Load();
+                writer.WriteLine($"认证页面: {settings.LoginUrl}");
+                writer.WriteLine($"主检测目标: {settings.PrimaryDns}");
+                writer.WriteLine($"备用检测目标: {settings.SecondaryDns}");
+                writer.WriteLine($"检测超时: {settings.PingTimeout} ms");
+                writer.WriteLine($"检测间隔: {settings.CheckInterval} 秒");
+                writer.WriteLine($"校园网用户: {settings.Username}");
+                
+                writer.WriteLine();
+                writer.WriteLine("============================");
+                writer.WriteLine();
+            }
+            catch (Exception ex)
+            {
+                writer.WriteLine($"获取系统信息失败: {ex.Message}");
             }
         }
 
@@ -234,15 +333,17 @@ namespace NetworkMonitor
                 // 检查是否需要轮转
                 RotateLogFileIfNeeded();
 
+                string sanitizedMessage = SecurityUtility.SanitizeLogMessage(message);
+
                 string timestamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff");
                 string levelStr = level.ToString().ToUpper().PadRight(10);
-                string logLine = $"[{timestamp}] [{levelStr}] {message}";
+                string logLine = $"[{timestamp}] [{levelStr}] {sanitizedMessage}";
 
                 // 写入文件
                 _currentWriter?.WriteLine(logLine);
 
                 // 触发UI事件（不包含完整时间戳，保持UI简洁）
-                string uiMessage = $"[{DateTime.Now:HH:mm:ss}] {message}";
+                string uiMessage = $"[{DateTime.Now:HH:mm:ss}] {sanitizedMessage}";
                 OnLogMessage?.Invoke(uiMessage);
             }
             catch (Exception ex)
