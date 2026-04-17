@@ -139,6 +139,8 @@ var
 begin
   if CurUninstallStep = usUninstall then
   begin
+    if RemoveDataOnUninstall then
+    begin
       AppDataDir := ExpandConstant('{localappdata}\NetworkMonitor');
       DeletePathIfExists(AppDataDir);
     end;
