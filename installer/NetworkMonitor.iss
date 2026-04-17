@@ -60,7 +60,7 @@ var
 
 function GetFileVersion(const FilePath: String): String;
 var
-  VersionMajor, VersionMinor, VersionBuild, VersionSub: Word;
+  VersionMajor, VersionMinor, VersionBuild, VersionSub: Cardinal;
 begin
   Result := '';
   if GetVersionNumbers(FilePath, VersionMajor, VersionMinor, VersionBuild, VersionSub) then
