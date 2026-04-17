@@ -1878,35 +1878,7 @@ namespace NetworkMonitor
 
         private bool EnsureInitialRequiredSettings()
         {
-            bool firstRun = !File.Exists(SettingsManager.GetSettingsFilePath());
-            bool missingRequired = string.IsNullOrWhiteSpace(username) || string.IsNullOrWhiteSpace(password);
-            if (!firstRun && !missingRequired)
-            {
-                return true;
-            }
-
-            MessageBox.Show("首次使用请先完成必要配置（账号、密码等）。", "首次配置", MessageBoxButtons.OK, MessageBoxIcon.Information);
-
-            while (true)
-            {
-                using var settingsForm = new SettingsForm(BuildCurrentSettings());
-                var result = settingsForm.ShowDialog(this);
-                if (result == DialogResult.OK)
-                {
-                    ApplySettingsFromForm(settingsForm);
-                    InitializeDiagnosticLogger();
-                    SaveSettings();
-                    AddLog("首次配置完成");
-                    return true;
-                }
-
-                var exitResult = MessageBox.Show("必须完成基础配置后才能使用软件，是否退出？", "提示", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-                if (exitResult == DialogResult.Yes)
-                {
-                    ExitApplication();
-                    return false;
-                }
-            }
+            return true;
         }
 
         private void SettingsButton_Click(object? sender, EventArgs e)
